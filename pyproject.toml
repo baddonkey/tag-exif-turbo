@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tag-exif-turbo"
+version = "0.0.1"
+description = "Native Qt Quick image-tagging reviewer for Exif Turbo MCP and Ollama"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6==6.12.0",
+    "mcp==2.3.0",
+    "httpx==0.28.1",
+    "pydantic==2.14.1",
+    "python-dotenv==1.2.4",
+    "jsonschema==4.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+
+[project.scripts]
+tag-exif-turbo = "main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"main.py" = "main.py"
+"qml" = "backend/resources/qml"
+"assets" = "backend/resources/assets"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "backend/",
+    "qml/",
+    "assets/",
+    "docs/",
+    "tests/",
+    "main.py",
+    "pyproject.toml",
+    "README.md",
+    ".env.example",
+]
