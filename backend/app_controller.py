@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from dataclasses import replace
 
 from PySide6.QtCore import QObject, Property, QSettings, QStandardPaths, QTimer, Qt, Signal, Slot
@@ -11,6 +12,7 @@ from .metadata_model import (
     metadata_values, normalize_description, proposed_description,
 )
 from .tag_model import TagModel
+from .ollama_client import refinement_sources
 from .worker import Command, Worker
 from .workflow import State, Workflow
 
@@ -51,6 +53,9 @@ class AppController(QObject):
     windowHeight = exposed("windowHeight", int, 820, changed)
     splitRatio = exposed("splitRatio", float, 0.65, changed)
     descriptionSuggestion = exposed("descriptionSuggestion", str, "", changed)
+    descriptionReviewNotes = exposed("descriptionReviewNotes", "QStringList", [], changed)
+    descriptionSuggestionRefined = exposed("descriptionSuggestionRefined", bool, False, changed)
+    descriptionSuggestionContext = exposed("descriptionSuggestionContext", "QVariantMap", {}, changed)
     descriptionWriteAvailable = exposed("descriptionWriteAvailable", bool, False, changed)
     descriptionExclusionAvailable = exposed("descriptionExclusionAvailable", bool, False, changed)
     tagExclusionAvailable = exposed("tagExclusionAvailable", bool, False, changed)
@@ -84,6 +89,7 @@ class AppController(QObject):
         self._metadata_draft = metadata_values({})
         self._description_touched = False
         self._analysis_description_only = False
+        self._analysis_request = None
         self._metadata_capabilities = {}
         self._bytes = b""
         self._token = 0
@@ -268,6 +274,15 @@ class AppController(QObject):
         if text:
             self.setDescription("\n\n".join(part for part in (self.currentDescription, text) if part) if append else text)
 
+    @Slot()
+    def regenerateDescriptionWithEmbeddedContext(self) -> None:
+        if self.canRegenerateDescriptionWithEmbeddedContext:
+            self._start_analysis({"mode": "refine", "sources": {"embedded": self.embeddedDescription}})
+
+    @Property(bool, notify=changed)
+    def canRegenerateDescriptionWithEmbeddedContext(self) -> bool:
+        return bool(self.canAnalyze and self.embeddedDescription.strip())
+
     @Slot(bool)
     def setIgnoreEmbeddedDescription(self, excluded: bool) -> None:
         self._set_exclusion("exclude_embedded_description", excluded, self.descriptionExclusionAvailable)
@@ -297,7 +312,8 @@ class AppController(QObject):
         self._metadata_draft = metadata_values(self._record or {})
         self._baseline = metadata_values(self._record or {})
         self._description_touched = False
-        self._update(descriptionSuggestion="", analysisNeeded=False)
+        self._update(descriptionSuggestion="", descriptionReviewNotes=[], descriptionSuggestionRefined=False,
+                 descriptionSuggestionContext={}, analysisNeeded=False)
 
     @Property(str, notify=changed)
     def modelName(self) -> str:
@@ -331,6 +347,10 @@ class AppController(QObject):
             "saved_tag_draft": self._saved_tag_draft, "tag_target": self.proposedCustomTags,
             "analysis_pending": self.flow.state == State.ANALYZING or self._values.get("analysisNeeded", False),
             "analysis_description_only": self._analysis_description_only,
+            "analysis_request": deepcopy(self._analysis_request),
+            "description_review_notes": list(self.descriptionReviewNotes),
+            "description_suggestion_refined": self.descriptionSuggestionRefined,
+            "description_suggestion_context": dict(self.descriptionSuggestionContext),
             "baseline": self._baseline, "metadata_draft": self._metadata_draft,
             "description_touched": self._description_touched,
             "description_suggestion": self.descriptionSuggestion,
@@ -479,13 +499,31 @@ class AppController(QObject):
         self._analyze(True)
 
     def _analyze(self, description_only: bool) -> None:
+        self._start_analysis({"mode": "description" if description_only else "image"})
+
+    def _restart_analysis(self) -> None:
+        self._start_analysis(self._analysis_request or {"mode": "description" if self._analysis_description_only else "image"})
+
+    def _start_analysis(self, request: dict) -> None:
         if not self.canAnalyze:
             return
-        self._analysis_description_only = description_only
+        request = deepcopy(request)
+        if request.get("mode") not in {"image", "description", "refine"}:
+            self._update(errorMessage="Unsupported saved analysis request. Generate a new suggestion.")
+            return
+        if request["mode"] == "refine":
+            try:
+                request["sources"] = refinement_sources(request.get("sources", {}))
+            except ValueError as error:
+                self._update(errorMessage=str(error))
+                return
+        self._analysis_request = request
+        self._analysis_description_only = request["mode"] != "image"
         self.flow.unresolved = True
-        self._state(State.ANALYZING, "Analyzing image with Ollama…")
+        self._state(State.ANALYZING, "Refining description with Ollama…" if request["mode"] == "refine" else "Analyzing image with Ollama…")
         self._update(errorMessage="")
-        self._submit("analyze", {"bytes": self._bytes, "description_only": description_only})
+        self._save_draft()
+        self._submit("analyze", {**deepcopy(request), "bytes": self._bytes, "description_only": self._analysis_description_only})
 
     @Slot()
     def regenerateTags(self) -> None:
@@ -554,7 +592,7 @@ class AppController(QObject):
         elif self._bytes and (not self.ollamaConnected or not self.modelReady):
             self.connectServices()
         elif self._last_operation == "analyze":
-            self._analyze(self._analysis_description_only)
+            self._restart_analysis()
         else:
             self._navigate(("load", self._offset))
 
@@ -601,6 +639,7 @@ class AppController(QObject):
         if loaded is None:
             self._record = None
             self._bytes = b""
+            self._analysis_request = None
             self.flow.unresolved = False
             self._update(currentImageUrl="", currentFilename="")
             self._state(State.COMPLETED, "No more images")
@@ -614,8 +653,15 @@ class AppController(QObject):
         self._metadata_draft = metadata_values(review.get("metadata_draft", self._record) if pending else self._record)
         self._description_touched = bool(pending and review.get("description_touched", False))
         self._analysis_description_only = bool(review and review.get("analysis_description_only", False))
+        self._analysis_request = deepcopy(review.get("analysis_request")) if review else None
         needs_analysis = review is None or review.get("analysis_pending", False) or (review["status"] == "pending" and not review.get("tags") and "metadata_draft" not in review)
-        self._update(descriptionSuggestion=review.get("description_suggestion", "") if pending else "", reconciledReview=False, analysisNeeded=needs_analysis)
+        self._update(
+            descriptionSuggestion=review.get("description_suggestion", "") if pending else "",
+            descriptionReviewNotes=review.get("description_review_notes", []) if pending else [],
+            descriptionSuggestionRefined=bool(pending and review.get("description_suggestion_refined", False)),
+            descriptionSuggestionContext=review.get("description_suggestion_context", {}) if pending else {},
+            reconciledReview=False, analysisNeeded=needs_analysis,
+        )
         self._bytes = loaded["bytes"]
         self._images.show(self._record)
         self._existing.replace(self._record.get("free_tags", []))
@@ -641,7 +687,7 @@ class AppController(QObject):
         elif needs_analysis:
             self._save_draft()
             if self.canAnalyze:
-                QTimer.singleShot(0, self.generateDescriptionSuggestion if self._analysis_description_only else self.analyzeCurrentImage)
+                QTimer.singleShot(0, self._restart_analysis)
             else:
                 self._update(
                     statusMessage="Tag suggestions are waiting for Ollama",
@@ -692,12 +738,18 @@ class AppController(QObject):
         elif kind == "loaded":
             self._display(payload["loaded"], payload["review"])
         elif kind == "analyzed":
-            if not payload.get("description_only", False):
+            refined = payload.get("refinement", False)
+            if not refined and not payload.get("description_only", False):
                 self._suggested.replace(payload["tags"])
             suggestion = payload.get("description", "")
-            if suggestion and not self.currentDescription and not self._description_touched and self.descriptionWriteAvailable:
+            if suggestion and not refined and not self.currentDescription and not self._description_touched and self.descriptionWriteAvailable:
                 self._metadata_draft = {**self._metadata_draft, "description": suggestion}
-            self._update(descriptionSuggestion=suggestion, analysisNeeded=False)
+            self._update(
+                descriptionSuggestion=suggestion, analysisNeeded=False,
+                descriptionReviewNotes=payload.get("review_notes", []) if refined else [],
+                descriptionSuggestionRefined=refined,
+                descriptionSuggestionContext=dict(payload.get("context_sources", {})) if refined else {},
+            )
             self.flow.unresolved = True
             self._state(State.AWAITING_APPROVAL, "Review proposed tags and description before applying")
             self._update(reviewStatus="pending")

@@ -4,10 +4,15 @@ from contextlib import asynccontextmanager
 import pytest
 
 from backend.config import Config
-from backend.worker import Command, Worker
+from backend.worker import Command, Worker, error_text
 from backend.metadata_model import metadata_values
 from backend.state_manager import StateManager
-from backend.ollama_client import Analysis
+from backend.ollama_client import Analysis, DescriptionRefinement
+
+
+def test_refinement_deadline_reports_preserved_draft():
+    assert "timed out" in error_text(TimeoutError())
+    assert "draft were preserved" in error_text(TimeoutError())
 
 
 @pytest.fixture
@@ -18,6 +23,7 @@ def controlled_services(monkeypatch):
             self.release = asyncio.Event()
             self.cancelled = asyncio.Event()
             self.calls = []
+            self.refinement_calls = []
             self.closed = False
 
         async def health(self):
@@ -33,6 +39,11 @@ def controlled_services(monkeypatch):
                     self.cancelled.set()
                     raise
             return Analysis(tags=["tree", "grass", "sky", "cloud", "landscape"], description="A tree beneath clouds.")
+
+        async def refine_description(self, image_bytes, sources):
+            self.refinement_calls.append((image_bytes, dict(sources)))
+            analysis = await self.analyze(image_bytes)
+            return DescriptionRefinement(description=analysis.description, review_notes=["Supplied date needs review."])
 
         async def close(self):
             self.closed = True
@@ -64,7 +75,8 @@ def controlled_services(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_preview_loads_do_not_wait_for_inference_and_pending_work_is_coalesced(gui, tmp_path, controlled_services):
+@pytest.mark.parametrize("mode", ["image", "refine"])
+async def test_preview_loads_do_not_wait_for_inference_and_pending_work_is_coalesced(gui, tmp_path, controlled_services, mode):
     worker = Worker(Config(), str(tmp_path))
     events = {("connected", 1): asyncio.Event(), ("loaded", 3): asyncio.Event(), ("loaded", 5): asyncio.Event(), ("analyzed", 6): asyncio.Event()}
     errors = []
@@ -89,7 +101,7 @@ async def test_preview_loads_do_not_wait_for_inference_and_pending_work_is_coale
         worker.submit(Command("load", 3, {"set_id": 1, "offset": 1}))
         worker.submit(Command("analyze", 4, {"bytes": b"middle"}))
         worker.submit(Command("load", 5, {"set_id": 1, "offset": 2}))
-        worker.submit(Command("analyze", 6, {"bytes": b"latest", "description_only": True}))
+        worker.submit(Command("analyze", 6, {"bytes": b"latest", "description_only": True, "mode": mode, "sources": {"embedded": "Paris, 1962."}}))
         await asyncio.wait_for(events[("loaded", 3)].wait(), 1)
         await asyncio.wait_for(events[("loaded", 5)].wait(), 1)
         assert not client.release.is_set()
@@ -99,6 +111,13 @@ async def test_preview_loads_do_not_wait_for_inference_and_pending_work_is_coale
         assert client.calls == [b"old", b"latest"]
         assert analyses[-1]["description"] == "A tree beneath clouds."
         assert analyses[-1]["description_only"]
+        if mode == "refine":
+            assert analyses[-1]["refinement"]
+            assert "tags" not in analyses[-1]
+            assert analyses[-1]["context_sources"] == {"embedded": "Paris, 1962."}
+            assert analyses[-1]["review_notes"] == ["Supplied date needs review."]
+        else:
+            assert client.refinement_calls == []
         assert not errors
     finally:
         running.cancel()
@@ -106,6 +125,27 @@ async def test_preview_loads_do_not_wait_for_inference_and_pending_work_is_coale
             await running
     assert all(client.closed for client in controlled_services)
     assert worker._analysis_task is None
+
+
+@pytest.mark.asyncio
+async def test_refinement_failure_never_falls_back_to_image_analysis(gui, tmp_path):
+    class Ollama:
+        async def health(self):
+            return {"ready": True}
+
+        async def refine_description(self, image_bytes, sources):
+            raise RuntimeError("Refinement unavailable")
+
+        async def analyze(self, image_bytes):
+            pytest.fail("Refinement must not fall back to image-only generation")
+
+    worker = Worker(Config(), str(tmp_path))
+    worker._queue = asyncio.Queue()
+    events = []
+    worker.result.connect(lambda kind, token, payload: events.append((kind, token, payload)))
+    await worker._analyze(Command("analyze", 7, {"mode": "refine", "bytes": b"image", "sources": {"custom": "Context"}}), Ollama())
+    assert not any(kind == "analyzed" for kind, _, _ in events)
+    assert events[-1] == ("error", 7, {"operation": "analyze", "message": "Refinement unavailable"})
 
 
 @pytest.mark.asyncio

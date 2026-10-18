@@ -92,6 +92,12 @@ Description contains a multiline custom draft, AI proposal with Use/Append actio
 and Generate suggestion, which requests a fresh description without replacing tag
 suggestions. This is available even when restoring an older tags-only review.
 Description-only analysis retains its scope on Retry and deferred-analysis restore.
+Regenerate Suggestion with Embedded Context is an additional one-click action that
+uses the current embedded description automatically. There are no context source
+selectors, editable context forms or refresh dialogs. The custom draft is not sent
+as context. The action is disabled without embedded text or a ready model.
+Refinement results show Source context used and any Review notes. All source and
+model text is rendered as plain text with native accessible controls.
 It also shows read-only embedded text and an Ignore embedded description switch. Enter inserts
 a newline; there is no focus-loss autosave or separate metadata Save. Replacing
 nonempty draft text with a proposal and applying a cleared saved description require
@@ -237,6 +243,48 @@ The prompt requires factual visual evidence and forbids inferred identities,
 named locations, events, dates or private traits. Requests bound the context to
 4,096 tokens and generation to 512 tokens. Hallucination avoidance is a prompt
 constraint, not a factuality guarantee; human review remains mandatory.
+
+### Description Refinement
+
+Explicit Refine uses two requests to the same configured model: image-only visual
+observations, followed by a text-only rewrite combining those observations with
+the selected source descriptions. This avoids source text being ignored by the
+configured vision model in a combined image/context request. Both requests share
+one configured inference deadline and each uses a bounded 4,096-context/512-output
+budget. Refinement reuses the image bytes and health checks, with a separate JSON schema:
+description (nonempty, at most 2,000 characters) and review_notes (required array,
+up to three nonempty notes of at most 200 characters, or an empty array). No tag
+generation is requested. The original image-only generation prompt is unchanged.
+
+The current embedded caption must be nonempty, normalized to NFC and LF, with at
+most 2,000 characters. Invalid control characters and oversized input are rejected
+before network I/O. No silent truncation or image-only fallback is
+performed after failure. The regular Generate action never sends context.
+
+The system prompt treats source-labelled JSON text as untrusted data, never model
+instructions. Relevant supplied names, dates, places and events may be retained as
+source claims, not independently verified visual facts. New visual details require
+image evidence. The model is instructed not to invent contextual facts and to flag
+visible contradictions or conflicting sources rather than silently choosing an
+unsupported account. Prompt separation does not guarantee factuality or protection
+against every instruction embedded in source text.
+
+Embedded-description exclusion controls only derivative composition. Excluded text
+remains available for context, and pressing the context button does not toggle exclusions.
+Refinement updates only the proposal, notes and recorded source provenance: it never
+auto-fills even an untouched empty custom draft, changes tags, writes MCP or advances
+the image. Use suggestion/Append and Apply retain their existing explicit boundaries.
+Failed or stale requests leave the previous usable proposal and manual drafts intact.
+Normal generation clears refinement notes/provenance on successful replacement.
+
+The context button snapshots the current embedded caption before queuing inference.
+Retry and restored pending analysis reuse that exact request; a new button press
+reads the current caption afresh. Older context-form settings are ignored. Old
+tag-only and description-only journals remain compatible; no SQLite migration is
+needed. The local journal contains request snapshots, review notes and proposal
+provenance, but never image bytes. Source text is not logged or sent to analytics.
+The explicit context action sends it to the configured Ollama endpoint, which need
+not be localhost.
 
 ## Concurrency and Persistence
 

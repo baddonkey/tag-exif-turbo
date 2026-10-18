@@ -644,3 +644,143 @@ def test_clear_suggested_tags_guards(controller, blocked):
     assert not controller.canClearSuggestedTags
     controller.clearSuggestedTags()
     assert controller._suggested.values() == before
+
+
+def enable_refinement(controller, status="pending"):
+    show_review(controller, status)
+    enable_metadata(controller)
+    controller._record["metadata"] = {"IFD0:ImageDescription": "Paris, 1962. A family near a fountain."}
+    controller._update(ollamaConnected=True, modelReady=True)
+
+
+def test_refinement_context_is_independent_of_embedded_exclusion(controller):
+    enable_refinement(controller)
+    original = controller.embeddedDescription
+    controller.setIgnoreEmbeddedDescription(True)
+    assert controller.embeddedDescription == original
+    controller.regenerateDescriptionWithEmbeddedContext()
+    command = controller.worker.commands[-1]
+    assert command.kind == "analyze"
+    assert command.payload["mode"] == "refine"
+    assert command.payload["sources"] == {"embedded": original}
+    assert command.payload["description_only"]
+    assert controller.ignoreEmbeddedDescription
+    assert not any(command.kind == "apply" for command in controller.worker.commands)
+
+
+def test_refinement_preserves_all_drafts_even_when_description_is_empty(controller):
+    enable_refinement(controller)
+    tags = controller._suggested.values()
+    assert controller.currentDescription == ""
+    controller.regenerateDescriptionWithEmbeddedContext()
+    controller._receive("analyzed", controller._token, {
+        "description": "Refined caption", "review_notes": ["Date is supplied context."],
+        "refinement": True, "context_sources": {"embedded": "Paris, 1962."},
+    })
+    assert controller.currentDescription == ""
+    assert controller._suggested.values() == tags
+    assert controller.descriptionSuggestion == "Refined caption"
+    assert controller.descriptionSuggestionRefined
+    assert controller.descriptionReviewNotes == ["Date is supplied context."]
+    controller._record["metadata"]["IFD0:ImageDescription"] = "Changed later"
+    assert controller.descriptionSuggestionContext == {"embedded": "Paris, 1962."}
+    controller.useDescriptionSuggestion(False)
+    assert controller.currentDescription == "Refined caption"
+
+
+def test_embedded_context_generation_from_resolved_review_needs_no_configuration(controller):
+    enable_refinement(controller, "applied")
+    assert not controller.flow.unresolved
+    controller.regenerateDescriptionWithEmbeddedContext()
+    assert controller.worker.commands[-1].payload["sources"] == {"embedded": controller.embeddedDescription}
+    assert controller.flow.unresolved
+
+
+def test_refinement_retry_uses_immutable_request_and_new_action_reads_current_caption(controller):
+    enable_refinement(controller)
+    controller.regenerateDescriptionWithEmbeddedContext()
+    request = controller.worker.commands[-1].payload["sources"].copy()
+    controller._receive("error", controller._token, {"operation": "analyze", "message": "timeout"})
+    controller._record["metadata"]["IFD0:ImageDescription"] = "Changed after failure"
+    controller.retryLastOperation()
+    assert controller.worker.commands[-1].payload["sources"] == request
+    controller._receive("error", controller._token, {"operation": "analyze", "message": "timeout"})
+    controller.regenerateDescriptionWithEmbeddedContext()
+    assert controller.worker.commands[-1].payload["sources"] == {"embedded": "Changed after failure"}
+
+
+def test_refinement_pending_request_restores_without_cross_image_leaks(controller):
+    enable_refinement(controller)
+    controller.regenerateDescriptionWithEmbeddedContext()
+    document = controller._journal()
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    loaded = {"record": controller._record, "bytes": b"preview", "image": image}
+    controller._display(loaded, document)
+    QTest.qWait(1)
+    assert controller.worker.commands[-1].payload["mode"] == "refine"
+    assert controller.worker.commands[-1].payload["sources"] == document["analysis_request"]["sources"]
+    controller.nextImage()
+    controller._display({**loaded, "record": {**loaded["record"], "id": 43, "metadata": {}}}, {"status": "applied", "tags": []})
+    assert controller._analysis_request is None
+    assert not controller.canRegenerateDescriptionWithEmbeddedContext
+
+
+def test_context_validation_and_normal_generation_never_use_sources(controller):
+    enable_refinement(controller)
+    controller._record["metadata"]["IFD0:ImageDescription"] = "x" * 2001
+    controller.regenerateDescriptionWithEmbeddedContext()
+    assert "exceeds" in controller.errorMessage
+    assert not any(command.kind == "analyze" for command in controller.worker.commands)
+    controller.generateDescriptionSuggestion()
+    assert "sources" not in controller.worker.commands[-1].payload
+    controller._receive("analyzed", controller._token, {"description_only": True, "description": "Image only"})
+    assert not controller.descriptionSuggestionRefined
+    assert controller.descriptionReviewNotes == []
+
+
+@pytest.mark.parametrize("blocked", ["missing-caption", "busy", "uncertain", "no-model"])
+def test_embedded_context_generation_guards(controller, blocked):
+    enable_refinement(controller)
+    if blocked == "missing-caption":
+        controller._record["metadata"] = {}
+    elif blocked == "busy":
+        controller._state(State.ANALYZING)
+    elif blocked == "uncertain":
+        controller._uncertain = True
+    else:
+        controller._update(modelReady=False)
+    before = len(controller.worker.commands)
+    assert not controller.canRegenerateDescriptionWithEmbeddedContext
+    controller.regenerateDescriptionWithEmbeddedContext()
+    assert len(controller.worker.commands) == before
+
+
+def test_embedded_context_button_never_includes_custom_draft_or_old_form_settings(controller):
+    enable_refinement(controller)
+    controller.setDescription("Custom facts")
+    document = controller._journal()
+    document["description_context"] = {"enabled": True, "embedded": "Stale context", "custom": "Stale custom facts"}
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    controller._display({"record": controller._record, "bytes": b"preview", "image": image}, document)
+    controller.regenerateDescriptionWithEmbeddedContext()
+    sources = controller.worker.commands[-1].payload["sources"]
+    assert sources == {"embedded": "Paris, 1962. A family near a fountain."}
+    assert "description_context" not in controller._journal()
+
+
+def test_refinement_notes_survive_failure_and_clear_on_image_only_result(controller):
+    enable_refinement(controller)
+    controller.regenerateDescriptionWithEmbeddedContext()
+    payload = {"refinement": True, "description": "Useful caption", "review_notes": ["Review the date"], "context_sources": {"embedded": "1962"}}
+    controller._receive("analyzed", controller._token, payload)
+    controller.regenerateDescriptionWithEmbeddedContext()
+    controller._receive("error", controller._token, {"operation": "analyze", "message": "timeout"})
+    assert controller.descriptionSuggestion == "Useful caption"
+    assert controller.descriptionReviewNotes == ["Review the date"]
+    controller._receive("analyzed", controller._token - 1, {**payload, "description": "Stale caption"})
+    assert controller.descriptionSuggestion == "Useful caption"
+    controller.generateDescriptionSuggestion()
+    controller._receive("analyzed", controller._token, {"description_only": True, "description": "Image-only caption"})
+    assert controller.descriptionReviewNotes == []
+    assert controller.descriptionSuggestionContext == {}
+    assert not controller.descriptionSuggestionRefined

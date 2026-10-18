@@ -193,6 +193,54 @@ def test_unified_metadata_controls_and_description_typing(controller, gui, tmp_p
         qml_value(exclude_description, "toggle(); toggled()")
         assert controller.ignoreEmbeddedDescription
         assert controller.proposedDescription == "Manual \ndescription"
+        assert window.findChild(QObject, "useDescriptionContext") is None
+        assert window.findChild(QObject, "embeddedContextEditor") is None
+        refine = window.findChild(QObject, "regenerateDescriptionWithEmbeddedContext")
+        generate_description = window.findChild(QObject, "generateDescriptionSuggestion")
+        assert refine.property("text") == generate_description.property("text") + " with embedded Context"
+        previous_suggestion = controller.descriptionSuggestion
+        controller._update(descriptionSuggestion="")
+        assert generate_description.property("text") == "Generate suggestion"
+        assert refine.property("text") == "Generate suggestion with embedded Context"
+        controller._update(descriptionSuggestion=previous_suggestion)
+        assert refine.property("text") == "Regenerate suggestion with embedded Context"
+        assert not refine.property("enabled")
+        controller._update(ollamaConnected=True, modelReady=True)
+        assert refine.property("enabled")
+        tags_before_refinement = controller._suggested.values()
+        qml_value(refine, "clicked()")
+        request = controller.worker.commands[-1]
+        assert request.payload["mode"] == "refine"
+        assert request.payload["sources"] == {"embedded": "Embedded caption"}
+        assert controller.ignoreEmbeddedDescription
+        assert not refine.property("enabled")
+        controller._receive("analyzed", controller._token, {
+            "refinement": True, "description": "Refined caption", "review_notes": ["Date is supplied context."],
+            "context_sources": request.payload["sources"],
+        })
+        assert controller.currentDescription == "Manual \ndescription"
+        assert controller._suggested.values() == tags_before_refinement
+        assert window.findChild(QObject, "refinementProvenance").property("visible")
+        assert controller.descriptionReviewNotes == ["Date is supplied context."]
+        original_width, original_height = window.width(), window.height()
+        description_scroll = window.findChild(QObject, "descriptionReviewScroll")
+        for dark in (True, False):
+            qml_value(tabs, f"Theme.dark = {'true' if dark else 'false'}")
+            for width, height in ((920, 640), (1600, 1000)):
+                window.setWidth(width)
+                window.setHeight(height)
+                QTest.qWait(50)
+                offset = qml_value(refine, "mapToItem(null, 0, 0).y") - qml_value(description_scroll, "mapToItem(null, 0, 0).y")
+                qml_value(description_scroll, f"contentItem.contentY = Math.max(0, contentItem.contentY + {offset})")
+                QTest.qWait(20)
+                assert refine.property("width") <= description_scroll.property("width")
+                assert refine.property("y") == generate_description.property("y")
+                assert refine.property("x") >= generate_description.property("x") + generate_description.property("width")
+                assert refine.property("x") + refine.property("width") <= refine.parentItem().width() + 1
+                assert window.grabWindow().save(str(tmp_path / f"refinement-{width}-{'dark' if dark else 'light'}.png"))
+        window.setWidth(original_width)
+        window.setHeight(original_height)
+        controller._update(ollamaConnected=False, modelReady=False)
         tabs.setProperty("currentIndex", 0)
         QTest.qWait(50)
         mode = window.findChild(QObject, "tagModeSelector")

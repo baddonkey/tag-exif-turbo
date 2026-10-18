@@ -60,6 +60,23 @@ this also works for restored older reviews that have no description proposal.
 Skip writes nothing and discards proposed saved-tag removals, description edits,
 and exclusion choices.
 
+For context-aware rewriting, click **Regenerate Suggestion with Embedded Context**
+in Description. It uses the current embedded caption automatically, with no extra
+settings, source selection or context editor. The regular Generate button remains
+image-only. Missing embedded text disables the context button; captions over 2,000
+characters are rejected rather than silently truncated.
+Refinement uses the same model in two stages: visual observations, then a contextual
+rewrite. Both stages share the configured inference deadline.
+
+Context and **Ignore embedded description** are independent: an excluded caption
+can still supply useful facts for refinement. Supplied names, dates, places and
+events may be retained without claiming visual verification. Review notes flag
+possible conflicts, but model output still needs your review. Refine changes only
+the proposal; Use suggestion or Append updates the draft, and Apply saves it.
+Request snapshots are kept in local review history for exact retries. Only the
+explicit context button sends embedded text to the configured Ollama endpoint,
+which may be remote. The custom draft is not sent as context.
+
 MCP applies the approved fields through separate calls, not an atomic transaction.
 If a write is interrupted, some changes may already be saved. Retry rereads metadata
 without replaying writes; review the actual state and explicitly Apply again to

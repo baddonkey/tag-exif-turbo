@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import AsyncExitStack
+from copy import deepcopy
 from dataclasses import dataclass, field
 from threading import Lock
 
@@ -23,7 +24,7 @@ class Command:
 def error_text(error: BaseException) -> str:
     if isinstance(error, BaseExceptionGroup):
         return "; ".join(error_text(item) for item in error.exceptions)
-    if isinstance(error, httpx.TimeoutException):
+    if isinstance(error, (httpx.TimeoutException, TimeoutError)):
         return "The service request timed out. Your image and draft were preserved. Check Ollama's loaded models and available memory, then retry."
     return str(error) or type(error).__name__
 
@@ -91,8 +92,16 @@ class Worker(QThread):
             self.result.emit("health", command.token, health)
             if not health["ready"]:
                 raise RuntimeError(health["message"])
-            analysis = await ollama.analyze(command.payload["bytes"])
-            self.result.emit("analyzed", command.token, {**analysis.model_dump(), "description_only": command.payload.get("description_only", False)})
+            if command.payload.get("mode") == "refine":
+                sources = deepcopy(command.payload["sources"])
+                refinement = await ollama.refine_description(command.payload["bytes"], sources)
+                self.result.emit("analyzed", command.token, {
+                    **refinement.model_dump(), "description_only": True,
+                    "refinement": True, "context_sources": sources,
+                })
+            else:
+                analysis = await ollama.analyze(command.payload["bytes"])
+                self.result.emit("analyzed", command.token, {**analysis.model_dump(), "description_only": command.payload.get("description_only", False)})
         except asyncio.CancelledError:
             raise
         except Exception as error:

@@ -25,11 +25,53 @@ ColumnLayout {
     }
     Label { visible: !appController.descriptionWriteAvailable && appController.mcpConnected; text: "Description editing unavailable"; color: Theme.warning; wrapMode: Text.Wrap; Layout.fillWidth: true }
     Label { text: "AI suggestion"; font.pixelSize: 17; font.weight: Font.DemiBold }
-    Button {
-        objectName: "generateDescriptionSuggestion"
-        text: appController.descriptionSuggestion.length > 0 ? "Regenerate suggestion" : "Generate suggestion"
-        enabled: appController.canAnalyze
-        onClicked: appController.generateDescriptionSuggestion()
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+        Button {
+            id: generateDescription
+            objectName: "generateDescriptionSuggestion"
+            text: appController.descriptionSuggestion.length > 0 ? "Regenerate suggestion" : "Generate suggestion"
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            Layout.preferredWidth: 1
+            Layout.preferredHeight: 56
+            enabled: appController.canAnalyze
+            onClicked: appController.generateDescriptionSuggestion()
+            contentItem: Label {
+                text: parent.text
+                font: parent.font
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                color: enabled ? Theme.text : Theme.muted
+            }
+        }
+        Button {
+            objectName: "regenerateDescriptionWithEmbeddedContext"
+            text: generateDescription.text + " with embedded Context"
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            Layout.preferredWidth: 2
+            Layout.preferredHeight: 56
+            enabled: appController.canRegenerateDescriptionWithEmbeddedContext
+            onClicked: appController.regenerateDescriptionWithEmbeddedContext()
+            contentItem: Label {
+                text: parent.text
+                font: parent.font
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                color: enabled ? Theme.text : Theme.muted
+            }
+        }
+    }
+    Label {
+        objectName: "refinementProvenance"
+        visible: appController.descriptionSuggestionRefined
+        text: "Source context used"
+        color: Theme.warning
+        Accessible.description: "Supplied facts have not been independently verified."
     }
     Label {
         Layout.fillWidth: true
@@ -37,6 +79,18 @@ ColumnLayout {
         textFormat: Text.PlainText
         wrapMode: Text.WrapAnywhere
         color: Theme.muted
+    }
+    Label { visible: appController.descriptionReviewNotes.length > 0; text: "Review notes"; font.weight: Font.DemiBold }
+    Repeater {
+        model: appController.descriptionReviewNotes
+        delegate: Label {
+            required property string modelData
+            text: modelData
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            wrapMode: Text.WrapAnywhere
+            color: Theme.warning
+        }
     }
     RowLayout {
         Layout.fillWidth: true

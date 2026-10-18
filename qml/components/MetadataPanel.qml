@@ -135,6 +135,7 @@ ColumnLayout {
         }
         ScrollView {
             id: descriptionScroll
+            objectName: "descriptionReviewScroll"
             clip: true
             contentWidth: availableWidth
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
