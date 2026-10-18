@@ -1,11 +1,12 @@
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
 
 import pytest
 from PySide6.QtCore import QObject, QSettings, Signal
-from PySide6.QtGui import QFont, QGuiApplication
+from PySide6.QtGui import QFont, QFontDatabase, QGuiApplication
 
 from backend.app_controller import AppController
 from backend.config import Config
@@ -17,6 +18,10 @@ def gui():
     app = QGuiApplication.instance() or QGuiApplication([])
     app.setOrganizationName("ExifTurboTests")
     app.setApplicationName("TaggerTests")
+    if os.name == "nt":
+        font_path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "segoeui.ttf"
+        if font_path.is_file():
+            QFontDatabase.addApplicationFont(str(font_path))
     app.setFont(QFont("Avenir Next", 12))
     return app
 

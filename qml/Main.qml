@@ -27,6 +27,20 @@ ApplicationWindow {
     palette.highlightedText: Theme.background
 
     property bool allowedToClose: false
+    property bool applyFromApproval: false
+    function requestApply(fromApproval) {
+        applyFromApproval = fromApproval
+        if (appController.removedCustomTags.length > 0) removeTags.open()
+        else confirmDescriptionClear()
+    }
+    function confirmDescriptionClear() {
+        if (appController.descriptionWillClear) clearDescription.open()
+        else performApply()
+    }
+    function performApply() {
+        if (applyFromApproval) appController.resolveApproval("apply")
+        else appController.applyChanges()
+    }
     property real restoredSplitRatio: 0.65
     readonly property bool textEditing: activeFocusItem !== null && (activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit)
     Component.onCompleted: {
@@ -84,13 +98,47 @@ ApplicationWindow {
             Label { text: appController.statusMessage; color: Theme.muted; elide: Text.ElideRight; Layout.fillWidth: true }
         }
     }
-    footer: ActionBar {}
+    footer: ActionBar { onApplyRequested: window.requestApply(false) }
     SettingsDialog { id: settings; anchors.centerIn: parent }
-    ApprovalDialog { id: approval; anchors.centerIn: parent }
+    ApprovalDialog { id: approval; anchors.centerIn: parent; onApplyRequested: window.requestApply(true) }
+    Dialog {
+        id: removeTags
+        objectName: "removeCustomTagsConfirmation"
+        title: "Remove saved custom tags?"
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(440, window.width - 40)
+        standardButtons: Dialog.Yes | Dialog.Cancel
+        ScrollView {
+            anchors.fill: parent
+            implicitHeight: Math.min(180, removedLabels.implicitHeight)
+            contentWidth: availableWidth
+            clip: true
+            Label {
+                id: removedLabels
+                width: parent.availableWidth
+                text: appController.removedCustomTags.join(", ")
+                textFormat: Text.PlainText
+                wrapMode: Text.WrapAnywhere
+            }
+        }
+        onAccepted: window.confirmDescriptionClear()
+        onRejected: { if (window.applyFromApproval) appController.resolveApproval("cancel") }
+    }
+    Dialog {
+        id: clearDescription
+        objectName: "clearDescriptionConfirmation"
+        title: "Clear saved custom description?"
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Yes | Dialog.Cancel
+        onAccepted: window.performApply()
+        onRejected: { if (window.applyFromApproval) appController.resolveApproval("cancel") }
+    }
     ErrorDialog { id: errors; anchors.centerIn: parent }
     Shortcut { sequence: "Alt+Right"; enabled: !window.textEditing && appController.canNext; onActivated: appController.nextImage() }
     Shortcut { sequence: "Alt+Left"; enabled: !window.textEditing && appController.canPrevious; onActivated: appController.previousImage() }
-    Shortcut { sequence: "Ctrl+Return"; enabled: appController.canApply; onActivated: appController.applyTags() }
+    Shortcut { sequence: "Ctrl+Return"; enabled: appController.canApply; onActivated: window.requestApply(false) }
     Shortcut { sequence: "Ctrl+R"; enabled: appController.canAnalyze; onActivated: appController.regenerateTags() }
     Shortcut { sequences: [StandardKey.Quit]; onActivated: appController.requestQuit() }
     Shortcut { sequence: "Ctrl+,"; onActivated: settings.open() }

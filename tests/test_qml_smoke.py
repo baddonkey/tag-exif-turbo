@@ -1,12 +1,36 @@
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QUrl
-from PySide6.QtGui import QIcon, QImage
+from PySide6.QtCore import QObject, Qt, QUrl
+from PySide6.QtGui import QIcon, QImage, QWindow
 from PySide6.QtQml import QQmlApplicationEngine, QQmlEngine, QQmlExpression
 from PySide6.QtTest import QTest
 from shiboken6 import delete
 
-from test_controller import show_review
+from test_controller import enable_metadata, show_review
+from main import show_startup_window
+
+
+def test_startup_centers_window_before_maximizing(gui, monkeypatch):
+    window = QWindow()
+    window.resize(920, 640)
+    available = window.screen().availableGeometry()
+    expected = (available.x() + (available.width() - 920) // 2,
+                available.y() + (available.height() - 640) // 2)
+    positions = []
+    maximize = window.showMaximized
+
+    def record_maximize():
+        positions.append((window.x(), window.y()))
+        maximize()
+
+    monkeypatch.setattr(window, "showMaximized", record_maximize)
+    try:
+        show_startup_window(window)
+        assert positions == [expected]
+        assert window.windowState() == Qt.WindowState.WindowMaximized
+        assert window.isVisible()
+    finally:
+        window.close()
 
 
 def test_application_icon_assets(gui):
@@ -126,6 +150,225 @@ def qml_value(scope, source):
     value = expression.evaluate()
     assert not expression.hasError(), expression.error().toString()
     return value[0] if isinstance(value, tuple) else value
+
+
+def test_unified_metadata_controls_and_description_typing(controller, gui, tmp_path):
+    engine = QQmlApplicationEngine()
+    warnings = []
+    engine.warnings.connect(lambda errors: warnings.extend(error.toString() for error in errors))
+    engine.addImageProvider("preview", controller.provider)
+    engine.rootContext().setContextProperty("appController", controller)
+    engine.load(QUrl.fromLocalFile(str(Path(__file__).parents[1] / "qml" / "Main.qml")))
+    assert engine.rootObjects(), warnings
+    window = engine.rootObjects()[0]
+    try:
+        show_review(controller)
+        enable_metadata(controller)
+        controller._record["metadata"] = {"XMP-dc:Subject": ["private", "tree"], "IFD0:ImageDescription": "Embedded caption"}
+        controller._update(descriptionSuggestion="A tree beneath clouds.")
+        tabs = window.findChild(QObject, "metadataTabs")
+        underline = window.findChild(QObject, "activeMetadataTabUnderline")
+        for dark in (True, False):
+            qml_value(tabs, f"Theme.dark = {'true' if dark else 'false'}")
+            for index in range(3):
+                tabs.setProperty("currentIndex", index)
+                QTest.qWait(1)
+                assert underline.property("height") == 3
+                assert underline.property("width") == qml_value(tabs, "currentItem.width")
+                assert underline.property("x") == qml_value(tabs, "leftPadding + currentItem.x")
+                assert underline.property("y") == tabs.property("height") - 3
+                assert underline.property("color") == qml_value(tabs, "Theme.accent")
+                assert contrast(underline.property("color"), qml_value(tabs, "Theme.surface")) >= 3
+        tabs.setProperty("currentIndex", 1)
+        QTest.qWait(50)
+        draft = window.findChild(QObject, "descriptionDraft")
+        assert draft.property("enabled")
+        qml_value(draft, "forceActiveFocus()")
+        qml_value(draft, 'insert(length, "Manual ")')
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        qml_value(draft, 'insert(length, "description")')
+        assert controller.currentDescription == "Manual \ndescription"
+        assert draft.property("text") == controller.currentDescription
+        exclude_description = window.findChild(QObject, "ignoreEmbeddedDescription")
+        qml_value(exclude_description, "toggle(); toggled()")
+        assert controller.ignoreEmbeddedDescription
+        assert controller.proposedDescription == "Manual \ndescription"
+        tabs.setProperty("currentIndex", 0)
+        QTest.qWait(50)
+        mode = window.findChild(QObject, "tagModeSelector")
+        current_heading = window.findChild(QObject, "currentCustomTagsHeading")
+        suggestion_editor = window.findChild(QObject, "tagSuggestionEditor")
+        assert current_heading.property("y") < mode.property("y") < suggestion_editor.property("y")
+        custom_preview = window.findChild(QObject, "customTagsSaveRepeater")
+        derivative_preview = window.findChild(QObject, "proposedMetadataPreview")
+        derivative_heading = window.findChild(QObject, "proposedDerivativeTagsHeading")
+        assert derivative_preview.property("visible")
+        assert derivative_heading.property("visible")
+        assert derivative_preview.property("text") == ", ".join(controller.proposedTags)
+        tabs.setProperty("currentIndex", 2)
+        assert not derivative_preview.property("visible")
+        assert not derivative_heading.property("visible")
+        tabs.setProperty("currentIndex", 0)
+        assert qml_value(custom_preview, "count") == len(controller.proposedCustomTags)
+        assert "existing" in [qml_value(custom_preview, f"itemAt({index}).label") for index in range(qml_value(custom_preview, "count"))]
+        assert "private" not in [qml_value(custom_preview, f"itemAt({index}).label") for index in range(qml_value(custom_preview, "count"))]
+        merge_mode = window.findChild(QObject, "mergeTagMode")
+        replace_mode = window.findChild(QObject, "replaceTagMode")
+        replace_all_mode = window.findChild(QObject, "replaceAllTagMode")
+        assert merge_mode.property("checked")
+        assert not replace_mode.property("checked")
+        assert not replace_all_mode.property("checked")
+        assert replace_all_mode.property("enabled")
+        qml_value(replace_all_mode, "clicked()")
+        assert replace_all_mode.property("checked")
+        assert not merge_mode.property("checked")
+        assert not replace_mode.property("checked")
+        assert controller.tagMode == "replace_all"
+        assert not controller.ignoreAllEmbeddedTags
+        assert "private" in controller.proposedTags
+        qml_value(replace_mode, "clicked()")
+        assert controller.tagMode == "replace"
+        assert not controller.ignoreAllEmbeddedTags
+        assert not replace_all_mode.property("checked")
+        assert replace_mode.property("checked")
+        assert not merge_mode.property("checked")
+        assert controller.removedCustomTags == ["existing"]
+        assert "existing" not in [qml_value(custom_preview, f"itemAt({index}).label") for index in range(qml_value(custom_preview, "count"))]
+        qml_value(merge_mode, "clicked()")
+        assert controller.removedCustomTags == []
+        assert "existing" in [qml_value(custom_preview, f"itemAt({index}).label") for index in range(qml_value(custom_preview, "count"))]
+        saved_tags = window.findChild(QObject, "savedCustomTagRepeater")
+        qml_value(saved_tags, "itemAt(0).removeRequested()")
+        assert controller.tagMode == "replace"
+        assert replace_mode.property("checked")
+        assert not merge_mode.property("checked")
+        assert not qml_value(saved_tags, "itemAt(0).included")
+        qml_value(window.findChild(QObject, "applyChangesButton"), "clicked()")
+        removal = window.findChild(QObject, "removeCustomTagsConfirmation")
+        assert removal.property("visible")
+        assert not any(command.kind == "apply" for command in controller.worker.commands)
+        qml_value(removal, "reject()")
+        qml_value(saved_tags, "itemAt(0).removeRequested()")
+        assert controller.removedCustomTags == []
+        qml_value(merge_mode, "clicked()")
+        keywords = window.findChild(QObject, "embeddedTagRepeater")
+        assert qml_value(keywords, "itemAt(0).label") == "private"
+        tag_scroll = window.findChild(QObject, "tagReviewScroll")
+        QTest.qWait(200)
+        qml_value(tag_scroll, "contentItem.contentY = Math.max(0, contentItem.contentHeight - contentItem.height)")
+        QTest.qWait(50)
+        for included, target in ((False, "padding"), (True, "label"), (False, "button")):
+            QTest.qWait(50)
+            pill = qml_value(keywords, "itemAt(0)")
+            assert pill.width() > 0
+            toggle = pill.findChild(QObject, "tagChipToggle")
+            assert toggle.property("text") == "\u00d7"
+            if target == "button":
+                point = qml_value(toggle, "mapToItem(null, width / 2, height / 2)")
+            elif target == "label":
+                label = pill.findChild(QObject, "tagChipLabel")
+                point = qml_value(label, "mapToItem(null, width / 2, height / 2)")
+            else:
+                point = qml_value(pill, "mapToItem(null, 4, height / 2)")
+            assert qml_value(tag_scroll, "mapToItem(null, 0, 0).y") <= point.y() < qml_value(tag_scroll, "mapToItem(null, 0, height).y")
+            QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point.toPoint())
+            assert qml_value(keywords, "itemAt(0).included") is included
+            pill = qml_value(keywords, "itemAt(0)")
+            assert pill.findChild(QObject, "tagChipLabel").property("font").strikeOut() is not included
+        assert controller._existing.values() == ["existing"]
+        assert not any(command.kind == "apply" for command in controller.worker.commands)
+        ignore_all = window.findChild(QObject, "ignoreAllEmbeddedTags")
+        qml_value(ignore_all, "toggle(); toggled()")
+        assert controller.ignoreAllEmbeddedTags
+        assert not qml_value(keywords, "itemAt(1).included")
+        assert not qml_value(keywords, "itemAt(0).enabled")
+        qml_value(ignore_all, "toggle(); toggled()")
+        assert not controller.ignoreAllEmbeddedTags
+        assert qml_value(keywords, "itemAt(1).included")
+        assert controller._metadata_draft["excluded_embedded_tags"] == ["private"]
+        assert derivative_preview.property("text") == ", ".join(controller.proposedTags)
+        assert "private" not in derivative_preview.property("text")
+        controller._update(ollamaConnected=True, modelReady=True)
+        tags_before = controller._suggested.values()
+        generate = window.findChild(QObject, "generateDescriptionSuggestion")
+        assert generate.property("enabled")
+        qml_value(generate, "clicked()")
+        assert controller.worker.commands[-1].payload["description_only"]
+        controller._receive("analyzed", controller._token, {"tags": ["different"], "description": "New proposal", "description_only": True})
+        assert controller._suggested.values() == tags_before
+        assert controller.descriptionSuggestion == "New proposal"
+        controller.setDescription("Long draft " * 100)
+        assert not any(command.kind == "apply" for command in controller.worker.commands)
+        for width, height in ((920, 640), (1600, 1000)):
+            window.setWidth(width)
+            window.setHeight(height)
+            tabs.setProperty("currentIndex", 0)
+            QTest.qWait(50)
+            qml_value(tag_scroll, "contentItem.contentY = 0")
+            QTest.qWait(20)
+            assert mode.property("width") > 0
+            assert mode.property("width") <= window.width()
+            assert replace_all_mode.property("x") + replace_all_mode.property("width") <= mode.property("width") + 1
+            clear_control = window.findChild(QObject, "clearSuggestedTagsButton")
+            generate_control = window.findChild(QObject, "generateSuggestedTagsButton")
+            assert generate_control.property("x") >= clear_control.property("x") + clear_control.property("width")
+            assert generate_control.property("x") + generate_control.property("width") <= generate_control.parentItem().width() + 1
+            assert derivative_heading.property("y") > window.findChild(QObject, "customTagsSavePreview").property("y")
+            assert derivative_preview.property("y") > derivative_heading.property("y")
+            assert window.grabWindow().save(str(tmp_path / f"tags-{width}.png"))
+            tabs.setProperty("currentIndex", 1)
+            QTest.qWait(50)
+            preview = window.findChild(QObject, "proposedMetadataPreview")
+            assert preview.property("width") > 0
+            assert draft.property("width") <= window.width()
+            assert window.grabWindow().save(str(tmp_path / f"metadata-{width}.png"))
+        controller._baseline["description"] = "Saved description"
+        controller.setDescription("")
+        button = window.findChild(QObject, "applyChangesButton")
+        qml_value(button, "clicked()")
+        confirmation = window.findChild(QObject, "clearDescriptionConfirmation")
+        assert confirmation.property("visible")
+        assert not any(command.kind == "apply" for command in controller.worker.commands)
+        qml_value(confirmation, "reject()")
+        controller.setDescription("Manual \ndescription")
+        clear_tags = window.findChild(QObject, "clearSuggestedTagsButton")
+        assert clear_tags.property("enabled")
+        qml_value(clear_tags, "clicked()")
+        assert controller._suggested.values() == []
+        assert controller._existing.values() == ["existing"]
+        assert not clear_tags.property("enabled")
+        assert controller.tagMode == "merge"
+        assert qml_value(custom_preview, "count") == 1
+        assert qml_value(custom_preview, "itemAt(0).label") == "existing"
+        controller.setTagMode("replace")
+        assert qml_value(custom_preview, "count") == 0
+        tabs.setProperty("currentIndex", 0)
+        assert window.findChild(QObject, "emptyCustomTagsPreview").property("visible")
+        controller.setTagMode("merge")
+        generate_tags = window.findChild(QObject, "generateSuggestedTagsButton")
+        assert generate_tags.property("enabled")
+        qml_value(generate_tags, "clicked()")
+        assert controller.worker.commands[-1].kind == "analyze"
+        assert not controller.worker.commands[-1].payload["description_only"]
+        assert not generate_tags.property("enabled")
+        controller._receive("analyzed", controller._token, {"tags": ["fresh suggestion"], "description": "Fresh description proposal"})
+        assert controller._suggested.values() == ["fresh suggestion"]
+        assert controller.currentDescription == "Manual \ndescription"
+        qml_value(saved_tags, "itemAt(0).removeRequested()")
+        button = window.findChild(QObject, "applyChangesButton")
+        assert button.property("text") == "Apply Changes"
+        qml_value(button, "clicked()")
+        assert removal.property("visible")
+        qml_value(removal, "accept()")
+        assert controller.worker.commands[-1].kind == "apply"
+        assert controller.worker.commands[-1].payload["tag_mode"] == "replace"
+        assert "existing" not in controller.worker.commands[-1].payload["tags"]
+        assert controller.worker.commands[-1].payload["metadata_draft"]["description"] == "Manual \ndescription"
+        assert not warnings, "\n".join(warnings)
+    finally:
+        window.setProperty("allowedToClose", True)
+        window.close()
+        delete(engine)
 
 
 def contrast(foreground, background):

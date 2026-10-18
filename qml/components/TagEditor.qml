@@ -7,6 +7,46 @@ ColumnLayout {
     id: editor
     spacing: 12
     Label { text: "Suggested tags"; font.pixelSize: 17; font.weight: Font.DemiBold }
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+        Button {
+            objectName: "clearSuggestedTagsButton"
+            text: "Clear all suggested tags"
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            Layout.preferredWidth: 1
+            Layout.preferredHeight: 52
+            enabled: appController.canClearSuggestedTags
+            onClicked: appController.clearSuggestedTags()
+            contentItem: Label {
+                text: parent.text
+                font: parent.font
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                color: enabled ? Theme.text : Theme.muted
+            }
+        }
+        Button {
+            objectName: "generateSuggestedTagsButton"
+            text: "Generate suggestions"
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            Layout.preferredWidth: 1
+            Layout.preferredHeight: 52
+            enabled: appController.canAnalyze
+            onClicked: appController.regenerateTags()
+            contentItem: Label {
+                text: parent.text
+                font: parent.font
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                color: enabled ? Theme.text : Theme.muted
+            }
+        }
+    }
     Flow {
         Layout.fillWidth: true
         spacing: 7

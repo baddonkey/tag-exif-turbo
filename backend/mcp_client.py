@@ -57,7 +57,9 @@ class McpClient:
         self.tools: dict = {}
         self.resources: list[str] = []
         self.can_write = False
+        self.can_replace_tags = False
         self.can_read_selected_image = False
+        self.metadata_capabilities: dict[str, bool] = {}
 
     @classmethod
     @asynccontextmanager
@@ -92,6 +94,22 @@ class McpClient:
             self.can_write = True
         except ValueError:
             self.can_write = False
+        try:
+            self.validate_call("set_custom_tags_batch", {"updates": [{"image_id": 1, "path": "/schema-check", "tags": [], "mode": "replace"}]})
+            self.can_replace_tags = True
+        except ValueError:
+            self.can_replace_tags = False
+        for name, extra in {
+            "set_image_description": {"description": "schema-check", "mode": "replace"},
+            "set_image_description_excluded": {"excluded": False},
+            "set_image_embedded_tag_excluded": {"tag": "schema-check", "excluded": False},
+            "set_image_all_embedded_tags_excluded": {"excluded": False},
+        }.items():
+            try:
+                self.validate_call(name, {"image_id": 1, "path": "/schema-check", **extra})
+                self.metadata_capabilities[name] = True
+            except ValueError:
+                self.metadata_capabilities[name] = False
         try:
             page = await self.session.list_resource_templates()
             self.resources = [str(item.uri_template) for item in page.resource_templates]
@@ -135,6 +153,7 @@ class McpClient:
         record = records[0]
         if not isinstance(record.get("id"), int) or not record.get("path") or not record.get("filename"):
             raise ValueError("MCP image has no stable ID, path, or filename.")
+        self.validate_metadata(record)
         return record, result
 
     async def load_image(self, set_id: int, offset: int) -> dict | None:
@@ -164,6 +183,10 @@ class McpClient:
         if metadata is not None and not isinstance(metadata, dict):
             raise ValueError("Unsupported selected-image metadata.")
         record = {"id": image_id, "path": path, "filename": filename, "free_tags": free_tags, "metadata": metadata or {}}
+        for key in ("description", "exclude_embedded_description", "excluded_embedded_tags", "exclude_all_embedded_tags"):
+            if key in payload:
+                record[key] = payload[key]
+        self.validate_metadata(record)
         if not include_preview:
             return {"record": record}
         encoded = payload.get("preview_jpeg_base64")
@@ -175,6 +198,37 @@ class McpClient:
 
     async def load_selected_image(self) -> dict:
         return await self.fetch_selected_image()
+
+    @staticmethod
+    def validate_metadata(record: dict) -> None:
+        if "description" in record and not isinstance(record["description"], str):
+            raise ValueError("Unsupported custom description.")
+        for key in ("exclude_embedded_description", "exclude_all_embedded_tags"):
+            if key in record and type(record[key]) is not bool:
+                raise ValueError(f"Unsupported {key}.")
+        if "excluded_embedded_tags" in record:
+            tags = record["excluded_embedded_tags"]
+            if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+                raise ValueError("Unsupported embedded tag exclusions.")
+
+    async def apply_metadata(self, record: dict, name: str, arguments: dict) -> dict:
+        if not self.metadata_capabilities.get(name, False):
+            raise ValueError(f"Required MCP capability is unavailable: {name}")
+        payload, _ = await self.call(name, {**arguments, "image_id": record["id"], "path": record["path"]})
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise RuntimeError("MCP did not confirm the metadata write; reconcile before retrying.")
+        if type(payload.get("image_id")) is not int or payload["image_id"] != record["id"] or payload.get("path") != record["path"]:
+            raise RuntimeError("MCP write result identity mismatch; reconcile before retrying.")
+        required = {
+            "set_image_description": ("description",),
+            "set_image_description_excluded": ("exclude_embedded_description",),
+            "set_image_embedded_tag_excluded": ("excluded_embedded_tags", "exclude_all_embedded_tags"),
+            "set_image_all_embedded_tags_excluded": ("excluded_embedded_tags", "exclude_all_embedded_tags"),
+        }[name]
+        if any(key not in payload for key in required) or type(payload.get("changed")) is not bool:
+            raise RuntimeError("MCP write response has no confirmed metadata values.")
+        self.validate_metadata(payload)
+        return {key: payload[key] for key in required}
 
     async def preview_bytes(self, record: dict, result) -> bytes:
         encoded = record.get("preview_jpeg_base64")
@@ -218,10 +272,12 @@ class McpClient:
         with path.open("rb") as stream:
             return stream.read(MAX_IMAGE_BYTES + 1)
 
-    async def apply_tags(self, record: dict, tags: list[str]) -> list[str]:
-        if not self.can_write:
+    async def apply_tags(self, record: dict, tags: list[str], mode: str = "append") -> list[str]:
+        if mode not in {"append", "replace"}:
+            raise ValueError("Tag mode must be append or replace.")
+        if not (self.can_replace_tags if mode == "replace" else self.can_write):
             raise ValueError("No identity-addressed tag-writing capability is available.")
-        payload, _ = await self.call("set_custom_tags_batch", {"updates": [{"image_id": record["id"], "path": record["path"], "tags": tags, "mode": "append"}]})
+        payload, _ = await self.call("set_custom_tags_batch", {"updates": [{"image_id": record["id"], "path": record["path"], "tags": tags, "mode": mode}]})
         results = payload.get("results", [])
         if len(results) != 1:
             raise RuntimeError("MCP returned an ambiguous write result; reconcile before retrying.")

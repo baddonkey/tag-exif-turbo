@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import ".."
 
 ToolBar {
+    signal applyRequested()
     implicitHeight: 66
     background: Rectangle { color: Theme.surface; border.color: Theme.border }
     RowLayout {
@@ -15,7 +16,7 @@ ToolBar {
         Item { Layout.fillWidth: true }
         Button { text: "Regenerate"; enabled: appController.canAnalyze; onClicked: appController.regenerateTags() }
         Button { text: "Skip"; enabled: appController.canSkip; onClicked: appController.skipImage() }
-        Button { text: "Apply Tags"; highlighted: true; enabled: appController.canApply; onClicked: appController.applyTags(); ToolTip.visible: hovered; ToolTip.text: "Append the approved tags to this image" }
+        Button { objectName: "applyChangesButton"; text: "Apply Changes"; highlighted: true; enabled: appController.canApply; onClicked: applyRequested(); ToolTip.visible: hovered; ToolTip.text: "Save approved tags, description and embedded metadata exclusions" }
         Button { text: "Quit"; enabled: !appController.busy; onClicked: appController.requestQuit() }
     }
 }

@@ -8,6 +8,7 @@ from PySide6.QtCore import QThread, Signal
 
 from .config import Config
 from .mcp_client import McpClient
+from .metadata_model import metadata_matches, metadata_operations, metadata_values, normalize_description
 from .ollama_client import OllamaClient
 from .state_manager import StateManager
 
@@ -90,8 +91,8 @@ class Worker(QThread):
             self.result.emit("health", command.token, health)
             if not health["ready"]:
                 raise RuntimeError(health["message"])
-            tags = await ollama.analyze(command.payload["bytes"])
-            self.result.emit("analyzed", command.token, {"tags": tags})
+            analysis = await ollama.analyze(command.payload["bytes"])
+            self.result.emit("analyzed", command.token, {**analysis.model_dump(), "description_only": command.payload.get("description_only", False)})
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -106,6 +107,67 @@ class Worker(QThread):
             await asyncio.gather(self._analysis_task, return_exceptions=True)
         self._analysis_task = None
         self._analysis_token = None
+
+    async def _read_target(self, client, payload: dict) -> dict:
+        if payload.get("selected_image"):
+            record = (await client.fetch_selected_image(False))["record"]
+        else:
+            record, _ = await client.fetch_record(payload["set_id"], payload["offset"], False)
+        if record is None or record["id"] != payload["record"]["id"] or record["path"] != payload["record"]["path"]:
+            raise ValueError("Selected target changed. Refusing to write to an unverified image.")
+        return record
+
+    async def _apply_review(self, client, payload: dict, journal: StateManager) -> dict:
+        document = {**payload["journal"], "status": "uncertain", "confirmed_operations": []}
+        journal.save(document)
+        record = await self._read_target(client, payload)
+        baseline = payload.get("baseline", metadata_values(record))
+        draft = payload.get("metadata_draft", metadata_values(record))
+        draft = {**draft, "description": normalize_description(draft["description"])}
+        current = metadata_values(record)
+        for key in draft:
+            if draft[key] != baseline[key] and current[key] != baseline[key]:
+                raise ValueError("Saved metadata changed outside this review. Reconcile before applying again.")
+        desired = {key: draft[key] if draft[key] != baseline[key] else current[key] for key in draft}
+        operations = metadata_operations(current, desired)
+        existing = {tag.casefold() for tag in record.get("free_tags", [])}
+        replace_tags = payload.get("tag_mode", "merge") == "replace"
+        expected_tags = {tag.casefold() for tag in payload["tags"]}
+        baseline_tags = {tag.casefold() for tag in payload.get("tag_baseline", record.get("free_tags", []))}
+        if replace_tags and existing != baseline_tags and existing != expected_tags:
+            raise ValueError("Saved custom tags changed outside this review. Reconcile before replacing them.")
+        tags = payload["tags"] if replace_tags else [tag for tag in payload["tags"] if tag.casefold() not in existing]
+        write_tags = existing != expected_tags if replace_tags else bool(tags)
+        for name, arguments in operations:
+            if not client.metadata_capabilities.get(name, False):
+                raise ValueError(f"Required MCP capability is unavailable: {name}")
+            client.validate_call(name, {"image_id": record["id"], "path": record["path"], **arguments})
+        if write_tags and not (getattr(client, "can_replace_tags", False) if replace_tags else client.can_write):
+            raise ValueError("No identity-addressed tag-writing capability is available.")
+        if write_tags:
+            client.validate_call("set_custom_tags_batch", {"updates": [{"image_id": record["id"], "path": record["path"], "tags": tags, "mode": "replace" if replace_tags else "append"}]})
+            record = await self._read_target(client, payload)
+            if replace_tags:
+                fresh_tags = {tag.casefold() for tag in record.get("free_tags", [])}
+                if fresh_tags != existing:
+                    raise ValueError("Saved custom tags changed while applying. Reconcile before replacing them.")
+                await client.apply_tags(record, tags, "replace")
+            else:
+                await client.apply_tags(record, tags)
+            document["confirmed_operations"].append("tags")
+            journal.save(document)
+        for name, arguments in operations:
+            record = await self._read_target(client, payload)
+            await client.apply_metadata(record, name, arguments)
+            document["confirmed_operations"].append({"tool": name, "arguments": arguments})
+            journal.save(document)
+        record = await self._read_target(client, payload)
+        saved_tags = {tag.casefold() for tag in record.get("free_tags", [])}
+        tags_confirmed = saved_tags == expected_tags if replace_tags else expected_tags <= saved_tags
+        if not tags_confirmed or not metadata_matches(metadata_values(record), desired):
+            raise RuntimeError("MCP readback did not confirm all changes. Reconcile before retrying.")
+        journal.save({**document, "status": "applied", "baseline": metadata_values(record), "metadata_draft": metadata_values(record)})
+        return record
 
     async def _run(self) -> None:
         self._queue = asyncio.Queue()
@@ -177,6 +239,8 @@ class Worker(QThread):
                         self.result.emit("connected", command.token, {
                             "sets": sets, "selected": selected, "offset": offset, "loaded": image,
                             "review": saved, "can_write": client.can_write,
+                            "can_replace_tags": getattr(client, "can_replace_tags", False),
+                            "metadata_capabilities": getattr(client, "metadata_capabilities", {}),
                             "selected_image": selected_image,
                             "can_read_selected_image": getattr(client, "can_read_selected_image", False),
                             "tools": {name: tool.input_schema for name, tool in client.tools.items()},
@@ -207,20 +271,12 @@ class Worker(QThread):
                         if client is None:
                             raise ConnectionError("Reconnect MCP before writing tags.")
                         payload = command.payload
-                        if payload.get("selected_image"):
-                            record = (await client.fetch_selected_image(False))["record"]
-                        else:
-                            record, _ = await client.fetch_record(payload["set_id"], payload["offset"], False)
-                        if record is None or record["id"] != payload["record"]["id"] or record["path"] != payload["record"]["path"]:
-                            raise ValueError("Selected target changed. Refusing to write to an unverified image.")
                         if command.kind == "reconcile":
-                            self.result.emit("reconciled", command.token, {"tags": record.get("free_tags", [])})
+                            record = await self._read_target(client, payload)
+                            self.result.emit("reconciled", command.token, {"tags": record.get("free_tags", []), "record": record})
                         else:
-                            journal.save(payload["journal"])
-                            tags = await client.apply_tags(record, payload["tags"])
-                            document = {**payload["journal"], "status": "applied", "tags": payload["tags"]}
-                            journal.save(document)
-                            self.result.emit("applied", command.token, {"tags": tags})
+                            record = await self._apply_review(client, payload, journal)
+                            self.result.emit("applied", command.token, {"tags": record.get("free_tags", []), "record": record})
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:

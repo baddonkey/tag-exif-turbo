@@ -6,6 +6,10 @@ from PySide6.QtCore import QObject, Property, QSettings, QStandardPaths, QTimer,
 from .config import Config
 from .image_model import ImageModel
 from .image_provider import ImageProvider
+from .metadata_model import (
+    embedded_description, embedded_tags, included_tags, merge_tags, metadata_operations,
+    metadata_values, normalize_description, proposed_description,
+)
 from .tag_model import TagModel
 from .worker import Command, Worker
 from .workflow import State, Workflow
@@ -40,11 +44,17 @@ class AppController(QObject):
     currentMetadata = exposed("currentMetadata", str, "", changed)
     modelStatus = exposed("modelStatus", str, "Not checked", changed)
     tagWriteAvailable = exposed("tagWriteAvailable", bool, False, changed)
+    tagReplaceAvailable = exposed("tagReplaceAvailable", bool, False, changed)
     discoveredTools = exposed("discoveredTools", str, "", changed)
     darkTheme = exposed("darkTheme", bool, True, changed)
     windowWidth = exposed("windowWidth", int, 1280, changed)
     windowHeight = exposed("windowHeight", int, 820, changed)
     splitRatio = exposed("splitRatio", float, 0.65, changed)
+    descriptionSuggestion = exposed("descriptionSuggestion", str, "", changed)
+    descriptionWriteAvailable = exposed("descriptionWriteAvailable", bool, False, changed)
+    descriptionExclusionAvailable = exposed("descriptionExclusionAvailable", bool, False, changed)
+    tagExclusionAvailable = exposed("tagExclusionAvailable", bool, False, changed)
+    allTagsExclusionAvailable = exposed("allTagsExclusionAvailable", bool, False, changed)
 
     def __init__(self, config: Config, provider: ImageProvider, parent=None) -> None:
         super().__init__(parent)
@@ -67,6 +77,14 @@ class AppController(QObject):
         self._selected_mode = False
         self._can_read_selected_image = False
         self._record = None
+        self._tag_mode = "merge"
+        self._tag_baseline = []
+        self._saved_tag_draft = []
+        self._baseline = metadata_values({})
+        self._metadata_draft = metadata_values({})
+        self._description_touched = False
+        self._analysis_description_only = False
+        self._metadata_capabilities = {}
         self._bytes = b""
         self._token = 0
         self._offset = 0
@@ -110,7 +128,15 @@ class AppController(QObject):
 
     @Property(bool, notify=changed)
     def canApply(self) -> bool:
-        return bool(self._record and type(self._record.get("id")) is int and self._record["id"] > 0 and not self.busy and self.flow.unresolved and self.mcpConnected and self.tagWriteAvailable and self._suggested.rowCount() and not self._uncertain)
+        if not (self._record and type(self._record.get("id")) is int and self._record["id"] > 0 and not self.busy and self.flow.unresolved and self.mcpConnected and not self._uncertain):
+            return False
+        existing = {tag.casefold() for tag in self._existing.values()}
+        proposed = {tag.casefold() for tag in self.proposedCustomTags}
+        needs_tags = proposed != existing if self._tag_mode != "merge" else bool(proposed - existing)
+        operations = metadata_operations(self._baseline, self._metadata_draft)
+        return bool((self._suggested.rowCount() or needs_tags or operations or self._tag_mode != "merge" or self._values.get("reconciledReview", False))
+                and (not needs_tags or (self.tagReplaceAvailable if self._tag_mode != "merge" else self.tagWriteAvailable))
+                    and all(self._metadata_capabilities.get(name, False) for name, _ in operations))
 
     @Property(bool, notify=changed)
     def canAnalyze(self) -> bool:
@@ -129,12 +155,149 @@ class AppController(QObject):
         return bool(self._record and not self.busy and not self._uncertain)
 
     @Property(bool, notify=changed)
+    def canClearSuggestedTags(self) -> bool:
+        return bool(self.canSkip and self._suggested.rowCount())
+
+    @Property(bool, notify=changed)
     def canReloadCurrentImage(self) -> bool:
         return bool(self._selected_mode and self.mcpConnected and self._can_read_selected_image and not self.busy and not self._uncertain)
 
-    @Property(str, constant=True)
+    @Property(str, notify=changed)
     def currentDescription(self) -> str:
-        return ""
+        return self._metadata_draft["description"] if self._record else ""
+
+    @Property(str, notify=changed)
+    def embeddedDescription(self) -> str:
+        return embedded_description(self._record.get("metadata") or {}) if self._record else ""
+
+    @Property(bool, notify=changed)
+    def ignoreEmbeddedDescription(self) -> bool:
+        return self._metadata_draft["exclude_embedded_description"]
+
+    @Property(bool, notify=changed)
+    def ignoreAllEmbeddedTags(self) -> bool:
+        return self._metadata_draft["exclude_all_embedded_tags"]
+
+    @Property("QVariantList", notify=changed)
+    def embeddedTagRows(self) -> list[dict]:
+        if not self._record:
+            return []
+        excluded = {tag.casefold() for tag in self._metadata_draft["excluded_embedded_tags"]}
+        return [{"label": tag, "included": not self.ignoreAllEmbeddedTags and tag.casefold() not in excluded}
+                for tag in embedded_tags(self._record.get("metadata") or {})]
+
+    @Property(str, notify=changed)
+    def proposedDescription(self) -> str:
+        return proposed_description(self._record.get("metadata") or {}, self._metadata_draft) if self._record else ""
+
+    @Property("QStringList", notify=changed)
+    def proposedCustomTags(self) -> list[str]:
+        return merge_tags(self._saved_tag_draft if self._tag_mode != "merge" else self._existing.values(), self._suggested.values())
+
+    @Property(str, notify=changed)
+    def tagMode(self) -> str:
+        return self._tag_mode
+
+    @Property("QStringList", notify=changed)
+    def removedCustomTags(self) -> list[str]:
+        proposed = {tag.casefold() for tag in self.proposedCustomTags}
+        return [tag for tag in self._existing.values() if tag.casefold() not in proposed]
+
+    @Property("QVariantList", notify=changed)
+    def savedTagRows(self) -> list[dict]:
+        proposed = {tag.casefold() for tag in self.proposedCustomTags}
+        return [{"label": tag, "included": tag.casefold() in proposed} for tag in self._existing.values()]
+
+    @Slot(str)
+    def setTagMode(self, mode: str) -> None:
+        if mode not in {"merge", "replace", "replace_all"} or mode == self._tag_mode or not self.canSkip:
+            return
+        if mode != "merge" and not self.tagReplaceAvailable:
+            return
+        was_replacing = self._tag_mode != "merge"
+        self._tag_mode = mode
+        if mode == "merge":
+            self._saved_tag_draft = self._existing.values()
+        elif not was_replacing:
+            self._saved_tag_draft = []
+        self._edited()
+
+    @Slot(str, bool)
+    def setSavedTagIncluded(self, tag: str, included: bool) -> None:
+        if not self.canSkip or not self.tagReplaceAvailable:
+            return
+        label = next((value for value in self._existing.values() if value.casefold() == tag.casefold()), None)
+        if label is None:
+            return
+        retained = self._existing.values() if self._tag_mode == "merge" else self._saved_tag_draft
+        if self._tag_mode == "merge":
+            self._tag_mode = "replace"
+        self._saved_tag_draft = [value for value in retained if value.casefold() != label.casefold()]
+        if included:
+            self._saved_tag_draft = merge_tags(self._saved_tag_draft, [label])
+        else:
+            for suggested in self._suggested.values():
+                if suggested.casefold() == label.casefold():
+                    self._suggested.remove(suggested)
+        self._edited()
+
+    @Property("QStringList", notify=changed)
+    def proposedTags(self) -> list[str]:
+        return merge_tags(self.proposedCustomTags, included_tags(self._record.get("metadata") or {}, self._metadata_draft)) if self._record else []
+
+    @Property(bool, notify=changed)
+    def descriptionWillClear(self) -> bool:
+        return bool(self._baseline["description"] and not normalize_description(self.currentDescription))
+
+    @Slot(str)
+    def setDescription(self, text: str) -> None:
+        if self.busy or self._uncertain or not self._record or not self.descriptionWriteAvailable:
+            return
+        try:
+            normalize_description(text)
+        except ValueError as error:
+            self._update(errorMessage=str(error))
+            return
+        self._description_touched = True
+        self._metadata_draft = {**self._metadata_draft, "description": text}
+        self._edited()
+
+    @Slot(bool)
+    def useDescriptionSuggestion(self, append: bool) -> None:
+        text = self.descriptionSuggestion
+        if text:
+            self.setDescription("\n\n".join(part for part in (self.currentDescription, text) if part) if append else text)
+
+    @Slot(bool)
+    def setIgnoreEmbeddedDescription(self, excluded: bool) -> None:
+        self._set_exclusion("exclude_embedded_description", excluded, self.descriptionExclusionAvailable)
+
+    @Slot(bool)
+    def setIgnoreAllEmbeddedTags(self, excluded: bool) -> None:
+        self._set_exclusion("exclude_all_embedded_tags", excluded, self.allTagsExclusionAvailable)
+
+    def _set_exclusion(self, field: str, value, available: bool) -> None:
+        if self._record and available and not self.busy and not self._uncertain:
+            self._metadata_draft = {**self._metadata_draft, field: value}
+            self._edited()
+
+    @Slot(str, bool)
+    def setEmbeddedTagIncluded(self, tag: str, included: bool) -> None:
+        if self.ignoreAllEmbeddedTags:
+            return
+        tags = [value for value in self._metadata_draft["excluded_embedded_tags"] if value.casefold() != tag.casefold()]
+        if not included:
+            tags.append(tag)
+        self._set_exclusion("excluded_embedded_tags", tags, self.tagExclusionAvailable)
+
+    def _discard_metadata(self) -> None:
+        self._tag_mode = "merge"
+        self._tag_baseline = self._existing.values()
+        self._saved_tag_draft = self._existing.values()
+        self._metadata_draft = metadata_values(self._record or {})
+        self._baseline = metadata_values(self._record or {})
+        self._description_touched = False
+        self._update(descriptionSuggestion="", analysisNeeded=False)
 
     @Property(str, notify=changed)
     def modelName(self) -> str:
@@ -164,7 +327,13 @@ class AppController(QObject):
             "image_id": self._record["id"], "path": self._record["path"],
             "selected_image": self._selected_mode,
             "tags": self._suggested.values(), "status": status,
-            "analysis_pending": self.flow.state == State.ANALYZING,
+            "tag_mode": self._tag_mode, "tag_baseline": self._tag_baseline,
+            "saved_tag_draft": self._saved_tag_draft, "tag_target": self.proposedCustomTags,
+            "analysis_pending": self.flow.state == State.ANALYZING or self._values.get("analysisNeeded", False),
+            "analysis_description_only": self._analysis_description_only,
+            "baseline": self._baseline, "metadata_draft": self._metadata_draft,
+            "description_touched": self._description_touched,
+            "description_suggestion": self.descriptionSuggestion,
         }
 
     @Slot()
@@ -264,6 +433,7 @@ class AppController(QObject):
         elif decision == "apply":
             self.applyTags()
         elif decision == "skip" and self.canSkip:
+            self._discard_metadata()
             self.flow.resolve("skipped")
             self._update(reviewStatus="skipped")
             self._save_draft()
@@ -284,6 +454,7 @@ class AppController(QObject):
     @Slot()
     def skipImage(self) -> None:
         if self.canSkip:
+            self._discard_metadata()
             self.flow.resolve("skipped")
             self._update(reviewStatus="skipped", errorMessage="")
             self._save_draft()
@@ -301,12 +472,20 @@ class AppController(QObject):
 
     @Slot()
     def analyzeCurrentImage(self) -> None:
+        self._analyze(False)
+
+    @Slot()
+    def generateDescriptionSuggestion(self) -> None:
+        self._analyze(True)
+
+    def _analyze(self, description_only: bool) -> None:
         if not self.canAnalyze:
             return
+        self._analysis_description_only = description_only
         self.flow.unresolved = True
         self._state(State.ANALYZING, "Analyzing image with Ollama…")
         self._update(errorMessage="")
-        self._submit("analyze", {"bytes": self._bytes})
+        self._submit("analyze", {"bytes": self._bytes, "description_only": description_only})
 
     @Slot()
     def regenerateTags(self) -> None:
@@ -327,11 +506,21 @@ class AppController(QObject):
         if not self.busy and not self._uncertain and self._suggested.remove(tag):
             self._edited()
 
+    @Slot()
+    def clearSuggestedTags(self) -> None:
+        if self.canClearSuggestedTags:
+            self._suggested.replace([])
+            self._edited()
+
     def _edited(self) -> None:
         self.flow.unresolved = True
-        self._state(State.AWAITING_APPROVAL, "Review suggested tags")
-        self._update(reviewStatus="pending")
+        self._state(State.AWAITING_APPROVAL, "Review proposed changes")
+        self._update(reviewStatus="pending", analysisNeeded=False)
         self._draft_timer.start()
+
+    @Slot()
+    def applyChanges(self) -> None:
+        self.applyTags()
 
     @Slot()
     def applyTags(self) -> None:
@@ -342,9 +531,11 @@ class AppController(QObject):
             "set_id": self._selected["id"], "offset": self.currentOffset,
             "selected_image": self._selected_mode,
             "record": {"id": self._record["id"], "path": self._record["path"]},
-            "tags": self._suggested.values(), "journal": self._journal("uncertain"),
+            "tags": self.proposedCustomTags if self._tag_mode != "merge" else self._suggested.values(), "journal": self._journal("uncertain"),
+            "tag_mode": "replace" if self._tag_mode != "merge" else "merge", "tag_baseline": self._tag_baseline,
+            "baseline": self._baseline, "metadata_draft": self._metadata_draft,
         }
-        self._state(State.APPLYING_TAGS, "Applying approved tags…")
+        self._state(State.APPLYING_TAGS, "Applying approved metadata changes…")
         self._update(errorMessage="")
         self._submit("apply", payload)
 
@@ -353,7 +544,7 @@ class AppController(QObject):
         if self.busy:
             return
         if self._uncertain and self._record:
-            self._update(busy=True, errorMessage="", statusMessage="Reconciling image tags; no write will be retried…")
+            self._update(busy=True, errorMessage="", statusMessage="Reconciling image metadata; no write will be retried…")
             self._submit("reconcile", {
                 "set_id": self._selected["id"], "offset": self.currentOffset,
                 "selected_image": self._selected_mode, "record": self._record,
@@ -363,7 +554,7 @@ class AppController(QObject):
         elif self._bytes and (not self.ollamaConnected or not self.modelReady):
             self.connectServices()
         elif self._last_operation == "analyze":
-            self.analyzeCurrentImage()
+            self._analyze(self._analysis_description_only)
         else:
             self._navigate(("load", self._offset))
 
@@ -415,6 +606,16 @@ class AppController(QObject):
             self._state(State.COMPLETED, "No more images")
             return
         self._record = loaded["record"]
+        pending = review and review["status"] in {"pending", "uncertain"}
+        self._tag_mode = review.get("tag_mode", "merge") if pending else "merge"
+        self._tag_baseline = list(review.get("tag_baseline", self._record.get("free_tags", [])) if pending else self._record.get("free_tags", []))
+        self._saved_tag_draft = list(review.get("saved_tag_draft", self._tag_baseline) if pending else self._tag_baseline)
+        self._baseline = metadata_values(review.get("baseline", self._record) if pending else self._record)
+        self._metadata_draft = metadata_values(review.get("metadata_draft", self._record) if pending else self._record)
+        self._description_touched = bool(pending and review.get("description_touched", False))
+        self._analysis_description_only = bool(review and review.get("analysis_description_only", False))
+        needs_analysis = review is None or review.get("analysis_pending", False) or (review["status"] == "pending" and not review.get("tags") and "metadata_draft" not in review)
+        self._update(descriptionSuggestion=review.get("description_suggestion", "") if pending else "", reconciledReview=False, analysisNeeded=needs_analysis)
         self._bytes = loaded["bytes"]
         self._images.show(self._record)
         self._existing.replace(self._record.get("free_tags", []))
@@ -436,11 +637,11 @@ class AppController(QObject):
         target_state = State.AWAITING_APPROVAL if self.flow.unresolved else State.COMPLETED if self.currentOffset + 1 >= self.totalImages else State.READY
         self._state(target_state, "Review restored" if review else "Preview loaded")
         if self._uncertain:
-            self._update(errorMessage="A previous write was interrupted. Retry reconciles tags without writing.")
-        elif review is None or review.get("analysis_pending", False) or (review["status"] == "pending" and not self._suggested.rowCount()):
+            self._update(errorMessage="A previous write was interrupted. Retry reconciles metadata without writing.")
+        elif needs_analysis:
             self._save_draft()
             if self.canAnalyze:
-                QTimer.singleShot(0, self.analyzeCurrentImage)
+                QTimer.singleShot(0, self.generateDescriptionSuggestion if self._analysis_description_only else self.analyzeCurrentImage)
             else:
                 self._update(
                     statusMessage="Tag suggestions are waiting for Ollama",
@@ -477,28 +678,55 @@ class AppController(QObject):
                 selectedImageSet=self._selected["name"],
                 totalImages=self._selected["member_count"],
                 tagWriteAvailable=payload["can_write"],
+                tagReplaceAvailable=payload.get("can_replace_tags", False),
                 discoveredTools=json.dumps(payload["tools"], indent=2),
+            )
+            self._metadata_capabilities = payload.get("metadata_capabilities", {})
+            self._update(
+                descriptionWriteAvailable=self._metadata_capabilities.get("set_image_description", False),
+                descriptionExclusionAvailable=self._metadata_capabilities.get("set_image_description_excluded", False),
+                tagExclusionAvailable=self._metadata_capabilities.get("set_image_embedded_tag_excluded", False),
+                allTagsExclusionAvailable=self._metadata_capabilities.get("set_image_all_embedded_tags_excluded", False),
             )
             self._display(payload["loaded"], payload["review"])
         elif kind == "loaded":
             self._display(payload["loaded"], payload["review"])
         elif kind == "analyzed":
-            self._suggested.replace(payload["tags"])
+            if not payload.get("description_only", False):
+                self._suggested.replace(payload["tags"])
+            suggestion = payload.get("description", "")
+            if suggestion and not self.currentDescription and not self._description_touched and self.descriptionWriteAvailable:
+                self._metadata_draft = {**self._metadata_draft, "description": suggestion}
+            self._update(descriptionSuggestion=suggestion, analysisNeeded=False)
             self.flow.unresolved = True
-            self._state(State.AWAITING_APPROVAL, "Review suggested tags before applying")
+            self._state(State.AWAITING_APPROVAL, "Review proposed tags and description before applying")
             self._update(reviewStatus="pending")
             self._save_draft()
         elif kind == "applied":
+            if "record" in payload:
+                self._record = payload["record"]
+                self._baseline = metadata_values(self._record)
+                self._metadata_draft = metadata_values(self._record)
             self._existing.replace(payload["tags"])
+            self._tag_baseline = list(payload["tags"])
+            self._saved_tag_draft = list(payload["tags"])
+            self._tag_mode = "merge"
             self.flow.resolve("applied")
-            self._state(State.READY, "Tags applied")
+            self._state(State.READY, "Changes applied")
             self._update(reviewStatus="applied")
             self._advance()
         elif kind == "reconciled":
+            if "record" in payload:
+                actual = metadata_values(payload["record"])
+                self._metadata_draft = {key: value if value != self._baseline[key] else actual[key]
+                                        for key, value in self._metadata_draft.items()}
+                self._baseline = actual
+                self._record = payload["record"]
             self._existing.replace(payload["tags"])
+            self._tag_baseline = list(payload["tags"])
             self._uncertain = False
-            self._state(State.AWAITING_APPROVAL, "Tags reconciled. Review before explicitly applying again.")
-            self._update(errorMessage="", busy=False)
+            self._state(State.AWAITING_APPROVAL, "Metadata reread. Some changes may already be saved; review and Apply to finish.")
+            self._update(errorMessage="", busy=False, reconciledReview=True)
             self._save_draft()
         elif kind == "reset":
             self._update(busy=False)

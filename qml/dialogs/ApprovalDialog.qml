@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 Dialog {
     id: dialog
+    signal applyRequested()
     title: "Resolve this image before leaving"
     modal: true
     closePolicy: Popup.NoAutoClose
@@ -15,7 +16,7 @@ Dialog {
         RowLayout {
             Button { text: "Cancel"; onClicked: { appController.resolveApproval("cancel"); dialog.close() } }
             Button { text: "Skip without writing"; onClicked: { appController.resolveApproval("skip"); dialog.close() } }
-            Button { text: "Apply Tags"; highlighted: true; enabled: appController.canApply; onClicked: { appController.resolveApproval("apply"); dialog.close() } }
+            Button { text: "Apply Changes"; highlighted: true; enabled: appController.canApply; onClicked: { dialog.applyRequested(); dialog.close() } }
         }
     }
 }

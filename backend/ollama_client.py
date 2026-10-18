@@ -4,12 +4,22 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .config import Config
+from .metadata_model import normalize_description
 from .tag_model import clean_tags
 
 
 class Analysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tags: list[str] = Field(min_length=5, max_length=10)
+    description: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, description: str) -> str:
+        text = normalize_description(description)
+        if not text:
+            raise ValueError("The description must not be empty.")
+        return text
 
     @field_validator("tags")
     @classmethod
@@ -40,17 +50,17 @@ class OllamaClient:
             return {"connected": True, "ready": False, "message": "The selected model does not advertise vision support."}
         return {"connected": True, "ready": True, "message": "Vision model ready"}
 
-    async def analyze(self, image_bytes: bytes) -> list[str]:
+    async def analyze(self, image_bytes: bytes) -> Analysis:
         response = await self.client.post("/api/chat", json={
             "model": self.config.model,
             "stream": False,
             "format": Analysis.model_json_schema(),
-            "options": {"temperature": 0.1, "num_predict": 256, "num_ctx": 4096},
+            "options": {"temperature": 0.1, "num_predict": 512, "num_ctx": 4096},
             "messages": [{
                 "role": "user",
-                "content": "Return JSON with 5 to 10 distinct, concise, searchable tags for this image. Describe only visibly supported subjects, objects, actions, surroundings and photographic characteristics. Do not infer people's identities, named locations, events, dates or private traits. Do not use filename or metadata to invent context. No descriptions or commentary.",
+                "content": "Return JSON with tags (5 to 10 distinct, concise, searchable tags) and description (1 to 3 concise factual sentences) for this image. Describe only visibly supported subjects, objects, actions, surroundings and photographic characteristics. Do not infer people's identities, named locations, events, dates or private traits. Do not use filename or metadata to invent context. No commentary outside JSON.",
                 "images": [base64.b64encode(image_bytes).decode("ascii")],
             }],
         })
         response.raise_for_status()
-        return Analysis.model_validate_json(response.json()["message"]["content"]).tags
+        return Analysis.model_validate_json(response.json()["message"]["content"])
