@@ -10,6 +10,8 @@ from .tag_model import TagModel
 from .worker import Command, Worker
 from .workflow import State, Workflow
 
+CURRENT_IMAGE_LABEL = "Current selected image"
+
 
 def exposed(name: str, kind, default, notify):
     return Property(kind, lambda self: self._values.get(name, default), notify=notify)
@@ -62,6 +64,8 @@ class AppController(QObject):
         self._images = ImageModel(self)
         self._sets: list[dict] = []
         self._selected = None
+        self._selected_mode = False
+        self._can_read_selected_image = False
         self._record = None
         self._bytes = b""
         self._token = 0
@@ -106,7 +110,7 @@ class AppController(QObject):
 
     @Property(bool, notify=changed)
     def canApply(self) -> bool:
-        return bool(self._record and not self.busy and self.flow.unresolved and self.mcpConnected and self.tagWriteAvailable and self._suggested.rowCount() and not self._uncertain)
+        return bool(self._record and type(self._record.get("id")) is int and self._record["id"] > 0 and not self.busy and self.flow.unresolved and self.mcpConnected and self.tagWriteAvailable and self._suggested.rowCount() and not self._uncertain)
 
     @Property(bool, notify=changed)
     def canAnalyze(self) -> bool:
@@ -123,6 +127,10 @@ class AppController(QObject):
     @Property(bool, notify=changed)
     def canSkip(self) -> bool:
         return bool(self._record and not self.busy and not self._uncertain)
+
+    @Property(bool, notify=changed)
+    def canReloadCurrentImage(self) -> bool:
+        return bool(self._selected_mode and self.mcpConnected and self._can_read_selected_image and not self.busy and not self._uncertain)
 
     @Property(str, constant=True)
     def currentDescription(self) -> str:
@@ -154,6 +162,7 @@ class AppController(QObject):
             "endpoint": self.config.mcp_url, "set_id": self._selected["id"],
             "set_name": self._selected["name"], "offset": self.currentOffset,
             "image_id": self._record["id"], "path": self._record["path"],
+            "selected_image": self._selected_mode,
             "tags": self._suggested.values(), "status": status,
             "analysis_pending": self.flow.state == State.ANALYZING,
         }
@@ -170,6 +179,18 @@ class AppController(QObject):
         selected = next((item for item in self._sets if item["name"] == name), None)
         if selected and (self._selected is None or selected["id"] != self._selected["id"]):
             self._navigate(("set", selected))
+
+    @Slot()
+    def selectCurrentImage(self) -> None:
+        if not self._can_read_selected_image:
+            self._update(errorMessage="The connected Exif Turbo server does not expose get_selected_image.")
+            return
+        self._navigate(("selected", None))
+
+    @Slot()
+    def reloadCurrentImage(self) -> None:
+        if self.canReloadCurrentImage:
+            self.selectCurrentImage()
 
     @Slot(int)
     def loadImage(self, offset: int) -> None:
@@ -209,7 +230,13 @@ class AppController(QObject):
             return
         if target[0] == "set":
             self._selected = target[1]
+            self._selected_mode = False
             self._update(selectedImageSet=self._selected["name"], totalImages=self._selected["member_count"])
+            offset = 0
+        elif target[0] == "selected":
+            self._selected = {"id": 0, "name": CURRENT_IMAGE_LABEL, "member_count": 1}
+            self._selected_mode = True
+            self._update(selectedImageSet=CURRENT_IMAGE_LABEL, totalImages=1)
             offset = 0
         else:
             offset = target[1]
@@ -224,7 +251,10 @@ class AppController(QObject):
         self._offset = offset
         self._state(State.LOADING_IMAGE, "Loading image preview…")
         self._update(errorMessage="")
-        self._submit("load", {"set_id": self._selected["id"], "offset": offset})
+        self._submit("load", {
+            "set_id": self._selected["id"], "offset": offset,
+            "selected_image": self._selected_mode,
+        })
 
     @Slot(str)
     def resolveApproval(self, decision: str) -> None:
@@ -264,6 +294,8 @@ class AppController(QObject):
             self._execute_target(self._target)
         elif self.currentOffset + 1 < self.totalImages:
             self._execute_target(("load", self.currentOffset + 1))
+        elif self._selected_mode:
+            self._state(State.COMPLETED, "Selected image complete")
         else:
             self._state(State.COMPLETED, "Image set complete")
 
@@ -308,6 +340,7 @@ class AppController(QObject):
         self._draft_timer.stop()
         payload = {
             "set_id": self._selected["id"], "offset": self.currentOffset,
+            "selected_image": self._selected_mode,
             "record": {"id": self._record["id"], "path": self._record["path"]},
             "tags": self._suggested.values(), "journal": self._journal("uncertain"),
         }
@@ -321,8 +354,13 @@ class AppController(QObject):
             return
         if self._uncertain and self._record:
             self._update(busy=True, errorMessage="", statusMessage="Reconciling image tags; no write will be retried…")
-            self._submit("reconcile", {"set_id": self._selected["id"], "offset": self.currentOffset, "record": self._record})
+            self._submit("reconcile", {
+                "set_id": self._selected["id"], "offset": self.currentOffset,
+                "selected_image": self._selected_mode, "record": self._record,
+            })
         elif not self.mcpConnected or self._last_operation == "connect":
+            self.connectServices()
+        elif self._bytes and (not self.ollamaConnected or not self.modelReady):
             self.connectServices()
         elif self._last_operation == "analyze":
             self.analyzeCurrentImage()
@@ -399,10 +437,15 @@ class AppController(QObject):
         self._state(target_state, "Review restored" if review else "Preview loaded")
         if self._uncertain:
             self._update(errorMessage="A previous write was interrupted. Retry reconciles tags without writing.")
-        elif review is None or review.get("analysis_pending", False):
+        elif review is None or review.get("analysis_pending", False) or (review["status"] == "pending" and not self._suggested.rowCount()):
             self._save_draft()
             if self.canAnalyze:
                 QTimer.singleShot(0, self.analyzeCurrentImage)
+            else:
+                self._update(
+                    statusMessage="Tag suggestions are waiting for Ollama",
+                    errorMessage=f"Cannot generate tag suggestions: {self.modelStatus}. Check Ollama and the configured vision model, then Retry.",
+                )
 
     @Slot(str, int, object)
     def _receive(self, kind: str, token: int, payload: dict) -> None:
@@ -423,10 +466,19 @@ class AppController(QObject):
         if kind == "connected":
             self._sets = payload["sets"]
             self._selected = payload["selected"]
+            self._selected_mode = payload.get("selected_image", False)
+            self._can_read_selected_image = payload.get("can_read_selected_image", False)
             self._offset = payload["offset"]
             self.flow.unresolved = False
             self._state(State.READY, "Connected")
-            self._update(mcpConnected=True, imageSets=[item["name"] for item in self._sets], selectedImageSet=self._selected["name"], totalImages=self._selected["member_count"], tagWriteAvailable=payload["can_write"], discoveredTools=json.dumps(payload["tools"], indent=2))
+            self._update(
+                mcpConnected=True,
+                imageSets=[item["name"] for item in self._sets],
+                selectedImageSet=self._selected["name"],
+                totalImages=self._selected["member_count"],
+                tagWriteAvailable=payload["can_write"],
+                discoveredTools=json.dumps(payload["tools"], indent=2),
+            )
             self._display(payload["loaded"], payload["review"])
         elif kind == "loaded":
             self._display(payload["loaded"], payload["review"])

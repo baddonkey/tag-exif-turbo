@@ -1,3 +1,4 @@
+import base64
 from types import SimpleNamespace
 
 import pytest
@@ -73,3 +74,48 @@ async def test_batch_per_image_failure():
     client.call = fake_call
     with pytest.raises(RuntimeError, match="identity mismatch"):
         await client.apply_tags({"id": 1, "path": "/a.jpg"}, ["tree"])
+
+
+@pytest.mark.asyncio
+async def test_selected_image_loads_identity_and_preview(monkeypatch):
+    client = McpClient(None, Config())
+    client.can_read_selected_image = True
+    image = object()
+
+    async def fake_call(name, arguments):
+        assert name == "get_selected_image"
+        assert arguments == {"include_preview": True}
+        return {
+            "image_id": 42,
+            "path": "/selected.jpg",
+            "filename": "selected.jpg",
+            "free_tags": ["existing"],
+            "metadata": {"Make": "Canon"},
+            "preview_jpeg_base64": base64.b64encode(b"preview").decode("ascii"),
+        }, None
+
+    monkeypatch.setattr("backend.mcp_client.decode_preview", lambda data: image)
+    client.call = fake_call
+    loaded = await client.load_selected_image()
+    assert loaded["record"] == {
+        "id": 42,
+        "path": "/selected.jpg",
+        "filename": "selected.jpg",
+        "free_tags": ["existing"],
+        "metadata": {"Make": "Canon"},
+    }
+    assert loaded["bytes"] == b"preview"
+    assert loaded["image"] is image
+
+
+@pytest.mark.asyncio
+async def test_selected_image_requires_stable_identity():
+    client = McpClient(None, Config())
+    client.can_read_selected_image = True
+
+    async def fake_call(name, arguments):
+        return {"image_id": None, "path": "/selected.jpg", "filename": "selected.jpg"}, None
+
+    client.call = fake_call
+    with pytest.raises(ValueError, match="stable ID"):
+        await client.fetch_selected_image(False)

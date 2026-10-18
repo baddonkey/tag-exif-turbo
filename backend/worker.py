@@ -162,15 +162,23 @@ class Worker(QThread):
                                 await asyncio.sleep(0.5 * 2 ** attempt)
                         sets = await client.list_sets()
                         saved = journal.restore(self.config.mcp_url)
-                        selected = select_startup_set(sets, self.config.default_set, saved)
-                        offset = saved["offset"] if saved else 0
-                        image = await client.load_image(selected["id"], offset)
+                        selected_image = bool(saved and saved.get("selected_image"))
+                        if selected_image:
+                            selected = {"id": 0, "name": "Current selected image", "member_count": 1}
+                            offset = 0
+                            image = await client.load_selected_image()
+                        else:
+                            selected = select_startup_set(sets, self.config.default_set, saved)
+                            offset = saved["offset"] if saved else 0
+                            image = await client.load_image(selected["id"], offset)
                         if saved:
                             if image is None or image["record"]["id"] != saved["image_id"] or image["record"]["path"] != saved["path"]:
-                                raise ValueError("Saved image identity no longer matches this set. Reset local progress in Settings.")
+                                raise ValueError("Saved image identity no longer matches the selected target. Reset local progress in Settings.")
                         self.result.emit("connected", command.token, {
                             "sets": sets, "selected": selected, "offset": offset, "loaded": image,
                             "review": saved, "can_write": client.can_write,
+                            "selected_image": selected_image,
+                            "can_read_selected_image": getattr(client, "can_read_selected_image", False),
                             "tools": {name: tool.input_schema for name, tool in client.tools.items()},
                         })
                     elif command.kind == "reset":
@@ -182,8 +190,13 @@ class Worker(QThread):
                     elif command.kind == "load":
                         if client is None:
                             raise ConnectionError("Reconnect MCP before loading images.")
-                        loaded = await client.load_image(command.payload["set_id"], command.payload["offset"])
-                        saved = journal.review(self.config.mcp_url, command.payload["set_id"], loaded["record"]) if loaded else None
+                        if command.payload.get("selected_image"):
+                            loaded = await client.load_selected_image()
+                            set_id = 0
+                        else:
+                            loaded = await client.load_image(command.payload["set_id"], command.payload["offset"])
+                            set_id = command.payload["set_id"]
+                        saved = journal.review(self.config.mcp_url, set_id, loaded["record"]) if loaded else None
                         self.result.emit("loaded", command.token, {"loaded": loaded, "review": saved})
                     elif command.kind == "analyze":
                         if self._analysis_task is None:
@@ -194,9 +207,12 @@ class Worker(QThread):
                         if client is None:
                             raise ConnectionError("Reconnect MCP before writing tags.")
                         payload = command.payload
-                        record, _ = await client.fetch_record(payload["set_id"], payload["offset"], False)
+                        if payload.get("selected_image"):
+                            record = (await client.fetch_selected_image(False))["record"]
+                        else:
+                            record, _ = await client.fetch_record(payload["set_id"], payload["offset"], False)
                         if record is None or record["id"] != payload["record"]["id"] or record["path"] != payload["record"]["path"]:
-                            raise ValueError("Image set changed. Refusing to write to an unverified image.")
+                            raise ValueError("Selected target changed. Refusing to write to an unverified image.")
                         if command.kind == "reconcile":
                             self.result.emit("reconciled", command.token, {"tags": record.get("free_tags", [])})
                         else:

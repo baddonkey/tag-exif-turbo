@@ -57,6 +57,7 @@ class McpClient:
         self.tools: dict = {}
         self.resources: list[str] = []
         self.can_write = False
+        self.can_read_selected_image = False
 
     @classmethod
     @asynccontextmanager
@@ -81,6 +82,11 @@ class McpClient:
                 break
         self.validate_call("list_image_sets", {})
         self.validate_call("get_image_set_images", {"set_id": 1, "offset": 0, "limit": 1, "include_previews": True})
+        try:
+            self.validate_call("get_selected_image", {"include_preview": True})
+            self.can_read_selected_image = True
+        except ValueError:
+            self.can_read_selected_image = False
         try:
             self.validate_call("set_custom_tags_batch", {"updates": [{"image_id": 1, "path": "/schema-check", "tags": ["schema-check"], "mode": "append"}]})
             self.can_write = True
@@ -139,6 +145,36 @@ class McpClient:
         image = decode_preview(data)
         record = {key: value for key, value in record.items() if key != "preview_jpeg_base64"}
         return {"record": record, "bytes": data, "image": image}
+
+    async def fetch_selected_image(self, include_preview: bool = True) -> dict:
+        if not self.can_read_selected_image:
+            raise ValueError("The connected Exif Turbo server does not expose get_selected_image.")
+        payload, _ = await self.call("get_selected_image", {"include_preview": include_preview})
+        if not isinstance(payload, dict):
+            raise ValueError("Unsupported selected-image response.")
+        image_id = payload.get("image_id")
+        path = payload.get("path")
+        filename = payload.get("filename")
+        if type(image_id) is not int or image_id <= 0 or not isinstance(path, str) or not path or not isinstance(filename, str) or not filename:
+            raise ValueError("The selected image has no stable ID, path, or filename for identity-verified tagging.")
+        free_tags = payload.get("free_tags", [])
+        metadata = payload.get("metadata")
+        if not isinstance(free_tags, list) or not all(isinstance(tag, str) for tag in free_tags):
+            raise ValueError("Unsupported selected-image tags.")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("Unsupported selected-image metadata.")
+        record = {"id": image_id, "path": path, "filename": filename, "free_tags": free_tags, "metadata": metadata or {}}
+        if not include_preview:
+            return {"record": record}
+        encoded = payload.get("preview_jpeg_base64")
+        if not isinstance(encoded, str) or not encoded or len(encoded) > MAX_IMAGE_BYTES * 4 // 3 + 8:
+            raise ValueError("No usable preview is available for the selected image.")
+        data = base64.b64decode(encoded, validate=True)
+        image = decode_preview(data)
+        return {"record": record, "bytes": data, "image": image}
+
+    async def load_selected_image(self) -> dict:
+        return await self.fetch_selected_image()
 
     async def preview_bytes(self, record: dict, result) -> bytes:
         encoded = record.get("preview_jpeg_base64")

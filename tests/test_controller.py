@@ -47,6 +47,136 @@ def test_navigation_never_implies_approval(controller):
     assert not any(command.kind == "apply" for command in controller.worker.commands)
 
 
+def test_current_selected_image_is_a_single_image_target(controller):
+    show_review(controller)
+    controller._can_read_selected_image = True
+    requested = QSignalSpy(controller.approvalRequested)
+    controller.selectCurrentImage()
+    assert requested.count() == 1
+    controller.resolveApproval("skip")
+    command = controller.worker.commands[-1]
+    assert command.kind == "load"
+    assert command.payload["selected_image"]
+    assert controller.selectedImageSet == "Current selected image"
+    assert controller.totalImages == 1
+    assert not controller.canNext
+
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill("#50b088")
+    controller._receive("loaded", controller._token, {
+        "loaded": {
+            "record": {"id": 84, "path": "/selected.jpg", "filename": "selected.jpg", "free_tags": []},
+            "bytes": b"selected-preview",
+            "image": image,
+        },
+        "review": {"status": "pending", "tags": ["tree"]},
+    })
+    controller.applyTags()
+    applied = controller.worker.commands[-1]
+    assert applied.kind == "apply"
+    assert applied.payload["selected_image"]
+    assert applied.payload["journal"]["selected_image"]
+
+
+@pytest.mark.parametrize("review", [None, {"status": "pending", "tags": [], "analysis_pending": False}])
+def test_selected_image_generates_tags_for_new_or_empty_pending_review(controller, review):
+    show_review(controller, "applied")
+    controller._can_read_selected_image = True
+    controller._update(ollamaConnected=True, modelReady=True)
+    controller.selectCurrentImage()
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill("#50b088")
+    controller._receive("loaded", controller._token, {
+        "loaded": {
+            "record": {"id": 84, "path": "/selected.jpg", "filename": "selected.jpg"},
+            "bytes": b"selected-preview",
+            "image": image,
+        },
+        "review": review,
+    })
+    QTest.qWait(1)
+    assert controller.flow.state == State.ANALYZING
+    assert controller.worker.commands[-1].kind == "analyze"
+    assert controller.worker.commands[-1].payload["bytes"] == b"selected-preview"
+    tags = ["tree", "sky", "grass", "cloud", "landscape"]
+    controller._receive("analyzed", controller._token, {"tags": tags})
+    assert controller._suggested.values() == tags
+    assert controller.flow.state == State.AWAITING_APPROVAL
+    assert controller.canApply
+
+
+@pytest.mark.parametrize("decision", ["cancel", "skip", "apply"])
+def test_reload_current_image_resolves_review_before_loading_latest_selection(controller, decision):
+    show_review(controller)
+    controller._selected_mode = True
+    controller._can_read_selected_image = True
+    requested = QSignalSpy(controller.approvalRequested)
+    assert controller.canReloadCurrentImage
+    before = len(controller.worker.commands)
+    controller.reloadCurrentImage()
+    assert requested.count() == 1
+    assert len(controller.worker.commands) == before
+    controller.resolveApproval(decision)
+    if decision == "cancel":
+        assert len(controller.worker.commands) == before
+        assert controller.flow.unresolved
+        return
+    if decision == "apply":
+        assert controller.worker.commands[-1].kind == "apply"
+        assert controller.worker.commands[-1].payload["record"]["id"] == 42
+        controller._receive("applied", controller._token, {"tags": ["tree"]})
+    command = controller.worker.commands[-1]
+    assert command.kind == "load"
+    assert command.payload["selected_image"]
+    assert command.payload["offset"] == 0
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill("#50b088")
+    controller._update(ollamaConnected=True, modelReady=True)
+    controller._receive("loaded", controller._token, {
+        "loaded": {
+            "record": {"id": 84, "path": "/new-selection.jpg", "filename": "new-selection.jpg"},
+            "bytes": b"new-selection-preview", "image": image,
+        },
+        "review": None,
+    })
+    QTest.qWait(1)
+    assert controller.currentFilename == "new-selection.jpg"
+    assert controller.worker.commands[-1].kind == "analyze"
+    assert controller.worker.commands[-1].payload["bytes"] == b"new-selection-preview"
+
+
+@pytest.mark.parametrize("blocked", ["set-mode", "busy", "uncertain", "disconnected"])
+def test_reload_current_image_is_guarded(controller, blocked):
+    show_review(controller, "applied")
+    controller._selected_mode = blocked != "set-mode"
+    controller._can_read_selected_image = True
+    if blocked == "busy":
+        controller._state(State.LOADING_IMAGE)
+    elif blocked == "uncertain":
+        controller._uncertain = True
+    elif blocked == "disconnected":
+        controller._update(mcpConnected=False)
+    before = len(controller.worker.commands)
+    assert not controller.canReloadCurrentImage
+    controller.reloadCurrentImage()
+    assert len(controller.worker.commands) == before
+
+
+def test_empty_pending_review_reports_unavailable_model_and_retry_reconnects(controller):
+    show_review(controller)
+    controller._update(ollamaConnected=True, modelReady=False, modelStatus="Model missing")
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill("#50b088")
+    controller._display({
+        "record": controller._record, "bytes": b"preview", "image": image,
+    }, {"status": "pending", "tags": []})
+    assert "Model missing" in controller.errorMessage
+    assert not any(command.kind == "analyze" for command in controller.worker.commands)
+    controller._last_operation = "load"
+    controller.retryLastOperation()
+    assert controller.worker.commands[-1].kind == "connect"
+
+
 def test_explicit_apply_snapshots_and_prevents_duplicate_write(controller):
     show_review(controller)
     controller.applyTags()

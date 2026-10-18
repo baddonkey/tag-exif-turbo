@@ -24,12 +24,12 @@ ToolBar {
         ComboBox {
             id: imageSetSelector
             objectName: "imageSetSelector"
-            Layout.preferredWidth: 170
-            model: appController.imageSets
-            currentIndex: appController.imageSets.indexOf(appController.selectedImageSet)
+            Layout.preferredWidth: 200
+            model: ["Current selected image"].concat(appController.imageSets)
+            currentIndex: appController.selectedImageSet === "Current selected image" ? 0 : appController.imageSets.indexOf(appController.selectedImageSet) + 1
             enabled: !appController.busy && appController.mcpConnected
-            onActivated: appController.selectImageSet(currentText)
-            Accessible.name: "Image set"
+            onActivated: if (currentIndex === 0) appController.selectCurrentImage(); else appController.selectImageSet(currentText)
+            Accessible.name: "Image source"
             delegate: ItemDelegate {
                 id: setOption
                 required property string modelData
@@ -49,6 +49,16 @@ ToolBar {
                     color: setOption.highlighted ? Theme.raised : Theme.surface
                 }
             }
+        }
+        ToolButton {
+            objectName: "reloadCurrentImageButton"
+            text: "Reload image"
+            visible: appController.selectedImageSet === "Current selected image"
+            enabled: appController.canReloadCurrentImage
+            onClicked: appController.reloadCurrentImage()
+            ToolTip.visible: hovered
+            ToolTip.text: "Load the image currently selected in Exif Turbo"
+            Accessible.name: "Reload current image"
         }
         ColumnLayout {
             Layout.preferredWidth: 100

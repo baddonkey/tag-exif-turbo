@@ -20,7 +20,7 @@ are outside the current scope.
 - Exif Turbo MCP: http://127.0.0.1:8765/mcp.
 - Ollama API: http://127.0.0.1:11434.
 - Default vision model: qwen3-vl:4b-instruct-q8_0.
-- Startup image set: restore saved progress, otherwise use the optional
+- Startup target: restore saved progress, otherwise use the optional
   DEFAULT_IMAGE_SET preference or the first available set. No specific name is required.
 - Exif Turbo must have an unlocked database and MCP enabled. Custom tagging must
   be enabled to permit writes.
@@ -54,7 +54,8 @@ This Python package is not a signed macOS application bundle or Windows installe
 
 ## Interface
 
-The ApplicationWindow contains a toolbar with service status, set selector,
+The ApplicationWindow contains a toolbar with service status, image-source selector
+(an image set or the current Exif Turbo selection as a single-image target),
 image index, progress and settings; a horizontal resizable SplitView; and an
 action bar with Previous, Next, Regenerate, Skip, Apply Tags and Quit.
 
@@ -76,9 +77,11 @@ The README hero image is readme_hs.png in this directory.
 ## Approval Workflow
 
 1. Initialize a persistent MCP connection and discover actual tools and schemas.
-2. Resolve the saved set, optional configured preference, or first available set.
+2. Resolve the saved target, optional configured set preference, or first
+  available set.
 3. Load one image with previews enabled at the saved offset or offset 0 for a new
-  review. Verify a restored image's ID and path before restoring its draft.
+  set review. In current-image mode, load the image selected in Exif Turbo. Verify
+  a restored image's ID and path before restoring its draft.
 4. Display the actual preview and send its complete encoded bytes to Ollama.
 5. Validate and display 5-10 distinct, meaningful, searchable suggested tags.
 6. Wait for explicit user review: edit, regenerate, apply or skip.
@@ -89,6 +92,8 @@ pending review through Apply, Skip without writing, or Cancel. Regenerate does n
 write or advance. Existing tags are read-only; removing a suggestion does not
 remove stored metadata. Revisiting a resolved review does not automatically
 reanalyze or write it.
+An empty pending draft restarts analysis when loaded. If Ollama or the configured
+vision model is unavailable, the app reports the reason; Retry reconnects services.
 
 Exception: Previous and Next remain available during ANALYZING. Navigating then
 defers the review without an approval dialog, preserves any existing draft, and
@@ -105,8 +110,11 @@ and processing order; the language model never receives or invokes MCP tools.
 
 Discovered schemas are validated before tool calls; parameters and response
 formats are not invented. The known Exif Turbo capabilities are list_image_sets,
-get_image_set_images, preview resources, and set_custom_tags_batch. The selection-
-relative add_custom_tags tool is not a safe substitute for indexed-image writes.
+get_image_set_images, preview resources, and set_custom_tags_batch.
+Current-image mode is available when the optional get_selected_image tool is
+present; it loads the selection through that tool and rechecks its ID and path
+before writing. The selection-relative add_custom_tags tool is not a safe
+substitute for indexed-image writes.
 
 Apply requires explicit approval and a safe identity-addressed writer. It submits
 one append update containing image ID and path. Existing tags are preserved.

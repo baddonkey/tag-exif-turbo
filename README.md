@@ -23,6 +23,10 @@ Keep these services running:
 Configure endpoints and the model in Settings or through [.env.example](.env.example).
 Startup restores your saved review or selects the first available image set.
 Optionally set `DEFAULT_IMAGE_SET` to prefer a set when starting without saved progress.
+Use the toolbar selector to review an image set or only the image currently
+selected in Exif Turbo. The single-image target is checked again before writing.
+In current-image mode, click **Reload image** after changing the selection in
+Exif Turbo. Pending reviews still require Apply, Skip, or Cancel before reloading.
 **Apply Tags requires explicit approval and preserves existing tags.**
 Previous and Next stay available during AI analysis; results for images you leave
 are discarded without writing tags.

@@ -34,7 +34,22 @@ def test_qml_models_resize_and_dialogs(controller, gui):
     window = engine.rootObjects()[0]
     try:
         show_review(controller)
-        controller._update(imageSets=["smoke-test", "other-test"], selectedImageSet="smoke-test")
+        controller._receive("connected", controller._token, {
+            "sets": [controller._selected, {"id": 2, "name": "other-test", "member_count": 1}],
+            "selected": controller._selected,
+            "offset": 0,
+            "loaded": {
+                "record": controller._record,
+                "bytes": controller._bytes,
+                "image": QImage(200, 100, QImage.Format.Format_RGB32),
+            },
+            "review": {"status": "pending", "tags": controller._suggested.values()},
+            "can_write": True,
+            "tools": {},
+        })
+        selector = window.findChild(QObject, "imageSetSelector")
+        assert qml_value(selector, "count") == 3
+        assert qml_value(selector, "currentIndex") == 1
         QTest.qWait(100)
         preview = window.findChild(QObject, "imagePreview")
         assert preview is not None
@@ -81,11 +96,24 @@ def test_qml_models_resize_and_dialogs(controller, gui):
             popup_open.evaluate()
             assert not popup_open.hasError()
             QTest.qWait(100)
-            assert qml_value(selector, "popup.contentItem.itemAtIndex(1).contentItem.text") == "other-test"
-            foreground = qml_value(selector, "popup.contentItem.itemAtIndex(1).contentItem.color")
-            background = qml_value(selector, "popup.contentItem.itemAtIndex(1).background.color")
+            assert qml_value(selector, "popup.contentItem.itemAtIndex(0).contentItem.text") == "Current selected image"
+            assert qml_value(selector, "popup.contentItem.itemAtIndex(2).contentItem.text") == "other-test"
+            foreground = qml_value(selector, "popup.contentItem.itemAtIndex(2).contentItem.color")
+            background = qml_value(selector, "popup.contentItem.itemAtIndex(2).background.color")
             assert contrast(foreground, background) >= 4.5
             QQmlExpression(QQmlEngine.contextForObject(selector), selector, "popup.close()").evaluate()
+        reload_button = window.findChild(QObject, "reloadCurrentImageButton")
+        assert not reload_button.property("visible")
+        controller._selected_mode = True
+        controller._can_read_selected_image = True
+        controller.flow.resolve("skipped")
+        controller._update(selectedImageSet="Current selected image")
+        assert reload_button.property("visible")
+        assert reload_button.property("enabled")
+        qml_value(reload_button, "clicked()")
+        assert controller.worker.commands[-1].kind == "load"
+        assert controller.worker.commands[-1].payload["selected_image"]
+        assert not reload_button.property("enabled")
         assert not warnings, "\n".join(warnings)
     finally:
         window.setProperty("allowedToClose", True)
