@@ -1,5 +1,9 @@
 # Exif Turbo AI Tagger: Project Specification
 
+For illustrated, task-oriented instructions, see the [user guide](user-guide.md).
+Screenshot photo sources and licences are listed in the
+[image credits](screenshots/README.md).
+
 ## Scope
 
 A native desktop application for reviewing and approving AI-generated image tags
