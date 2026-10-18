@@ -31,6 +31,66 @@ def test_qt_properties_are_registered(controller):
         assert controller.metaObject().indexOfProperty(name) >= 0
 
 
+@pytest.mark.parametrize("unchanged", ["empty", "duplicate-tags", "replace-identical", "reverted-description", "reverted-exclusions", "proposal-only"])
+def test_quit_without_metadata_changes_does_not_request_approval(controller, unchanged):
+    show_review(controller)
+    enable_metadata(controller)
+    controller.clearSuggestedTags()
+    if unchanged == "duplicate-tags":
+        controller.addTag("EXISTING")
+    elif unchanged == "replace-identical":
+        controller.setTagMode("replace")
+        controller.setSavedTagIncluded("existing", True)
+    elif unchanged == "reverted-description":
+        controller._baseline["description"] = "Saved caption"
+        controller._metadata_draft["description"] = "Saved caption"
+        controller.setDescription("Changed caption")
+        controller.setDescription(" Saved caption\r\n ")
+    elif unchanged == "reverted-exclusions":
+        controller.setIgnoreEmbeddedDescription(True)
+        controller.setIgnoreEmbeddedDescription(False)
+        controller.setIgnoreAllEmbeddedTags(True)
+        controller.setIgnoreAllEmbeddedTags(False)
+        controller.setEmbeddedTagIncluded("private", False)
+        controller.setEmbeddedTagIncluded("private", True)
+    elif unchanged == "proposal-only":
+        controller._update(descriptionSuggestion="Unused proposal", descriptionSuggestionRefined=True)
+    approval = QSignalSpy(controller.approvalRequested)
+    quit_approved = QSignalSpy(controller.quitApproved)
+    assert controller.flow.unresolved
+    assert not controller.hasPendingChanges
+    controller.requestQuit()
+    assert approval.count() == 0
+    assert quit_approved.count() == 1
+    assert not any(command.kind == "apply" for command in controller.worker.commands)
+
+
+@pytest.mark.parametrize("change", ["new-tag", "saved-removal", "description", "embedded-description", "embedded-tag", "all-embedded-tags"])
+def test_quit_with_metadata_changes_still_requests_approval(controller, change):
+    show_review(controller)
+    enable_metadata(controller)
+    controller.clearSuggestedTags()
+    if change == "new-tag":
+        controller.addTag("new")
+    elif change == "saved-removal":
+        controller.setSavedTagIncluded("existing", False)
+    elif change == "description":
+        controller.setDescription("Changed caption")
+    elif change == "embedded-description":
+        controller.setIgnoreEmbeddedDescription(True)
+    elif change == "embedded-tag":
+        controller.setEmbeddedTagIncluded("private", False)
+    else:
+        controller.setIgnoreAllEmbeddedTags(True)
+    approval = QSignalSpy(controller.approvalRequested)
+    quit_approved = QSignalSpy(controller.quitApproved)
+    assert controller.hasPendingChanges
+    controller.requestQuit()
+    assert approval.count() == 1
+    assert quit_approved.count() == 0
+    assert not any(command.kind == "apply" for command in controller.worker.commands)
+
+
 def test_navigation_never_implies_approval(controller):
     show_review(controller)
     requested = QSignalSpy(controller.approvalRequested)

@@ -133,6 +133,14 @@ class AppController(QObject):
         return self._images
 
     @Property(bool, notify=changed)
+    def hasPendingChanges(self) -> bool:
+        if not self._record:
+            return False
+        existing = {tag.casefold() for tag in self._existing.values()}
+        proposed = {tag.casefold() for tag in self.proposedCustomTags}
+        return bool(proposed != existing or metadata_operations(self._baseline, self._metadata_draft))
+
+    @Property(bool, notify=changed)
     def canApply(self) -> bool:
         if not (self._record and type(self._record.get("id")) is int and self._record["id"] > 0 and not self.busy and self.flow.unresolved and self.mcpConnected and not self._uncertain):
             return False
@@ -394,7 +402,7 @@ class AppController(QObject):
             self._save_draft()
             self._token += 1
             self.flow.unresolved = False
-        elif self.flow.unresolved:
+        elif self.flow.unresolved and (target[0] != "quit" or self.hasPendingChanges):
             self._target = target
             self.approvalRequested.emit()
             return

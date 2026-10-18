@@ -151,7 +151,10 @@ The README hero image is readme_hs.png in this directory.
 7. Advance only after the approval decision has been resolved.
 
 Previous, Next, changing sets or service configuration, and Quit must resolve a
-pending review through Apply, Skip without writing, or Cancel. Regenerate does not
+pending review through Apply, Skip without writing, or Cancel. Quit skips this dialog
+when proposed custom tags, normalized description and exclusion settings match the
+saved metadata; unused description proposals and reverted edits do not require a
+write decision. Existing busy and uncertain-write handling is unchanged. Regenerate does not
 write or advance. All description and exclusion edits remain local until the same
 Apply Changes approval used for tags. Apply may contain only description or exclusion
 changes and does not require Ollama to be available. Skip makes no MCP writes and
