@@ -76,9 +76,10 @@ def main() -> int:
         controller.shutdown()
         instance.close()
         return 1
-    engine.rootObjects()[0].setIcon(icon)
-    instance.activationRequested.connect(lambda: activate_window(engine.rootObjects()[0]))
-    show_startup_window(engine.rootObjects()[0])
+    window = engine.rootObjects()[0]
+    window.setIcon(icon)
+    instance.activationRequested.connect(lambda: activate_window(window))
+    show_startup_window(window)
     app.aboutToQuit.connect(controller.shutdown)
     controller.quitApproved.connect(app.quit)
     exit_code = 0
@@ -86,10 +87,10 @@ def main() -> int:
     def finish(code: int = 0) -> None:
         nonlocal exit_code
         exit_code = code
-        engine.rootObjects()[0].setProperty("allowedToClose", True)
+        window.setProperty("allowedToClose", True)
         if args.screenshot:
             args.screenshot.parent.mkdir(parents=True, exist_ok=True)
-            if not engine.rootObjects()[0].grabWindow().save(str(args.screenshot)):
+            if not window.grabWindow().save(str(args.screenshot)):
                 print("Screenshot capture failed", file=sys.stderr)
                 exit_code = 1
         app.quit()
