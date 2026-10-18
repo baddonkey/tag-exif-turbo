@@ -3,6 +3,8 @@
 For illustrated, task-oriented instructions, see the [user guide](user-guide.md).
 Screenshot photo sources and licences are listed in the
 [image credits](screenshots/README.md).
+Automated gates and local quality commands are documented in
+[Quality checks](continuous-integration.md).
 
 ## Scope
 

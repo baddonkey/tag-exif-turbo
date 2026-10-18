@@ -41,6 +41,7 @@ Applying updates Exif Turbo's sidecar and index, not the original image file.
 
 - [User guide](docs/user-guide.md): illustrated workflows, settings and troubleshooting.
 - [Project specification](docs/project-spec.md): architecture, configuration and verification.
+- [Quality checks](docs/continuous-integration.md): offline CI, security checks and local commands.
 - [Image credits](docs/screenshots/README.md): original sources, authors and licences.
 
 ## Develop

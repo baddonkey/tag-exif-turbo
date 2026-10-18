@@ -21,6 +21,12 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    "pytest-cov>=6,<8",
+    "ruff>=0.14,<1",
+    "build>=1.3,<2",
+    "twine>=7,<8",
+    "pip-audit>=2.9,<3",
+    "markdown-it-py>=3,<5",
 ]
 
 [project.scripts]
@@ -45,4 +51,29 @@ include = [
     "pyproject.toml",
     "README.md",
     ".env.example",
+    "scripts/",
 ]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["artifacts", "dist", "build"]
+
+[tool.ruff.lint]
+select = ["E9", "F"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["backend", "main"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.coverage.xml]
+output = "artifacts/coverage.xml"

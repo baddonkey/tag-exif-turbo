@@ -12,6 +12,15 @@ from PySide6.QtTest import QSignalSpy
 from backend import desktop
 
 
+def terminate_test_process(process):
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=5)
+    else:
+        process.kill()
+    process.wait(timeout=5)
+
+
 def test_windows_taskbar_identity(monkeypatch):
     setter = Mock(return_value=0)
     monkeypatch.setattr(desktop, "sys", SimpleNamespace(platform="win32"))
@@ -132,11 +141,10 @@ print('secondary exited')
         assert secondary.returncode == 0, secondary.stderr
         assert process.stdout.readline().strip() == "activated"
         assert not replacement.start(activate=False)
-        process.kill()
-        process.wait(timeout=5)
+        terminate_test_process(process)
         assert replacement.start()
     finally:
         if process.poll() is None:
-            process.kill()
+            terminate_test_process(process)
         process.communicate(timeout=5)
         replacement.close()

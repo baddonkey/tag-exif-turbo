@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QUrl
+from PySide6.QtCore import QDeadlineTimer, QObject, Qt, QUrl
 from PySide6.QtGui import QIcon, QImage, QWindow
 from PySide6.QtQml import QQmlApplicationEngine, QQmlEngine, QQmlExpression
 from PySide6.QtTest import QTest
@@ -8,6 +8,13 @@ from shiboken6 import delete
 
 from test_controller import enable_metadata, show_review
 from main import show_startup_window
+
+
+def wait_for_preview(preview, width):
+    deadline = QDeadlineTimer(3000)
+    while preview.property("sourceSize").width() != width and not deadline.hasExpired():
+        QTest.qWait(10)
+    assert preview.property("sourceSize").width() == width
 
 
 def test_startup_centers_window_before_maximizing(gui, monkeypatch):
@@ -47,7 +54,7 @@ def test_application_icon_assets(gui):
         assert not icon.pixmap(128, 128).isNull(), suffix
 
 
-def test_qml_models_resize_and_dialogs(controller, gui):
+def test_qml_models_resize_and_dialogs(controller, gui, record_ui_failure):
     engine = QQmlApplicationEngine()
     warnings = []
     engine.warnings.connect(lambda errors: warnings.extend(error.toString() for error in errors))
@@ -74,10 +81,9 @@ def test_qml_models_resize_and_dialogs(controller, gui):
         selector = window.findChild(QObject, "imageSetSelector")
         assert qml_value(selector, "count") == 3
         assert qml_value(selector, "currentIndex") == 1
-        QTest.qWait(100)
         preview = window.findChild(QObject, "imagePreview")
         assert preview is not None
-        assert preview.property("sourceSize").width() == 200
+        wait_for_preview(preview, 200)
         for width, height in ((920, 640), (1600, 1000)):
             window.setWidth(width)
             window.setHeight(height)
@@ -102,12 +108,11 @@ def test_qml_models_resize_and_dialogs(controller, gui):
                 currentFilename=f"image-{image_id}.jpg",
                 currentOffset=1 if set_name == "smoke-test" else 0,
             )
-            QTest.qWait(100)
+            wait_for_preview(preview, image_width)
             assert window.width() == 1600
             assert window.height() == 1000
             assert qml_value(window, "viewer.width") == panel_width
             assert qml_value(window, "viewer.height === split.height")
-            assert preview.property("sourceSize").width() == image_width
             assert preview.width() == qml_value(window, "viewer.fitWidth")
             assert preview.height() == qml_value(window, "viewer.fitHeight")
         controller._update(selectedImageSet="smoke-test", currentOffset=0)
@@ -140,6 +145,7 @@ def test_qml_models_resize_and_dialogs(controller, gui):
         assert not reload_button.property("enabled")
         assert not warnings, "\n".join(warnings)
     finally:
+        record_ui_failure()
         window.setProperty("allowedToClose", True)
         window.close()
         delete(engine)
@@ -152,7 +158,7 @@ def qml_value(scope, source):
     return value[0] if isinstance(value, tuple) else value
 
 
-def test_unified_metadata_controls_and_description_typing(controller, gui, tmp_path):
+def test_unified_metadata_controls_and_description_typing(controller, gui, tmp_path, record_ui_failure):
     engine = QQmlApplicationEngine()
     warnings = []
     engine.warnings.connect(lambda errors: warnings.extend(error.toString() for error in errors))
@@ -414,6 +420,7 @@ def test_unified_metadata_controls_and_description_typing(controller, gui, tmp_p
         assert controller.worker.commands[-1].payload["metadata_draft"]["description"] == "Manual \ndescription"
         assert not warnings, "\n".join(warnings)
     finally:
+        record_ui_failure()
         window.setProperty("allowedToClose", True)
         window.close()
         delete(engine)
